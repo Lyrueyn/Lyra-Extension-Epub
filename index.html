@@ -28,9 +28,8 @@
   .chapter.active { background:#2a2d33; color:#fff; }
   #main { flex:1; overflow:auto; background:var(--reader-bg); }
   #view { max-width:900px; margin:0 auto; padding:36px 44px 100px; font-size:18px; line-height:1.8;
-    background:var(--reader-bg); color:var(--reader-fg);
-    --reader-fg:var(--reader-fg) !important; }
-  #view * { color:var(--reader-fg) !important; }
+    background:var(--reader-bg); color:var(--reader-fg); }
+  #view, #view * { color:var(--reader-fg) !important; }
   #view a { color:var(--blue) !important; }
   #view img { max-width:100%; height:auto; }
   #theme { width:0; overflow:hidden; transition:width .18s; background:var(--panel); border-left:1px solid var(--line); }
