@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>璃鸢镜 · EPUB 阅读器</title>
 <style>
-  :root { --bg:#0f0f0f; --panel:#171717; --line:#2a2a2a; --text:#e8e8e8; --sub:#9ba0a5; --pink:#fb7299; --blue:#66ccff; }
+  :root { --bg:#0f0f0f; --panel:#171717; --line:#2a2a2a; --text:#e8e8e8; --sub:#9ba0a5;
+    --pink:#fb7299; --blue:#66ccff; --reader-bg:#121212; --reader-fg:#e6e6e6; }
   * { box-sizing:border-box; }
   html,body { height:100%; margin:0; background:var(--bg); color:var(--text);
     font-family:"Microsoft YaHei UI","Microsoft YaHei","Segoe UI",sans-serif; }
@@ -25,8 +26,23 @@
   .chapter { display:block; width:100%; text-align:left; padding:8px 9px; border-radius:6px;
     color:var(--text); font-size:13px; line-height:1.45; background:transparent; }
   .chapter.active { background:#2a2d33; color:#fff; }
-  #main { flex:1; overflow:auto; }
-  #view { max-width:900px; margin:0 auto; padding:36px 44px 100px; font-size:18px; line-height:1.8; }
+  #main { flex:1; overflow:auto; background:var(--reader-bg); }
+  #view { max-width:900px; margin:0 auto; padding:36px 44px 100px; font-size:18px; line-height:1.8;
+    background:var(--reader-bg); color:var(--reader-fg);
+    --reader-fg:var(--reader-fg) !important; }
+  #view * { color:var(--reader-fg) !important; }
+  #view a { color:var(--blue) !important; }
+  #view img { max-width:100%; height:auto; }
+  #theme { width:0; overflow:hidden; transition:width .18s; background:var(--panel); border-left:1px solid var(--line); }
+  #theme.open { width:240px; }
+  #theme .inner { width:240px; padding:14px 14px 20px; display:flex; flex-direction:column; gap:12px; }
+  #theme h3 { color:var(--sub); font-size:12px; font-weight:500; margin:0; }
+  #theme label { display:flex; align-items:center; justify-content:space-between; gap:8px;
+    color:var(--text); font-size:12px; }
+  #theme input[type=color] { width:64px; height:28px; border:1px solid var(--line); background:transparent; cursor:pointer; }
+  .swatches { display:flex; flex-wrap:wrap; gap:6px; }
+  .swatches button { padding:6px 8px; border-radius:8px; font-size:11px; }
+  #themeBtn { min-width:44px; }
   #view img { max-width:100%; height:auto; }
   #view a { color:var(--blue); }
   #view h1,#view h2,#view h3 { line-height:1.35; }
@@ -50,6 +66,7 @@
     <button id="nextBtn">下一章</button>
     <button id="fontDown">A-</button>
     <button id="fontUp">A+</button>
+    <button id="themeBtn" title="配色">🎨</button>
     <input id="file" type="file" accept=".epub,application/epub+zip"/>
   </div>
   <div id="body">
@@ -59,6 +76,24 @@
         <button id="emptyOpen" class="primary">选择 EPUB 文件</button></div>
       <div id="view" style="display:none"></div>
     </div>
+    <aside id="theme">
+      <div class="inner">
+        <h3>阅读配色</h3>
+        <label>背景色 <input type="color" id="bgColor" value="#121212"/></label>
+        <label>文字色 <input type="color" id="fgColor" value="#E6E6E6"/></label>
+        <div class="swatches">
+          <button data-bg="#121212" data-fg="#E6E6E6">暗色</button>
+          <button data-bg="#F5F0E6" data-fg="#2B2620">米黄</button>
+          <button data-bg="#E9F0E6" data-fg="#28402A">护眼绿</button>
+          <button data-bg="#FFFFFF" data-fg="#1A1A1A">白纸</button>
+          <button data-bg="#0A0F1C" data-fg="#B8D4FF">夜蓝</button>
+        </div>
+        <button id="resetTheme">恢复默认</button>
+        <div style="color:var(--sub);font-size:11px;line-height:1.6">
+          颜色会记住；书自带的黑色字/背景会被这里的设置覆盖。
+        </div>
+      </div>
+    </aside>
   </div>
   <div id="status"><span id="statusText">就绪</span><span class="right" id="position"></span></div>
 </div>
@@ -285,6 +320,8 @@
       }
 
       renderChapterList();
+      applyTheme(localStorage.getItem("lyra_epub_bg") || DEFAULT_THEME.bg,
+                 localStorage.getItem("lyra_epub_fg") || DEFAULT_THEME.fg, false);
       $("position").textContent = `第 ${idx + 1} / ${state.chapters.length} 章`;
       localStorage.setItem("lyra_epub_idx_" + state.bookKey, String(idx));
       setStatus("正在阅读：" + ch.title);
@@ -311,6 +348,36 @@
   function openPicker() { $("file").click(); }
   $("openBtn").addEventListener("click", openPicker);
   $("emptyOpen").addEventListener("click", openPicker);
+
+  // ★ 阅读配色：右侧 Tab 调色盘（背景/文字），localStorage 记忆
+  const themeEls = { bg: $("bgColor"), fg: $("fgColor") };
+  const DEFAULT_THEME = { bg: "#121212", fg: "#E6E6E6" };
+  function applyTheme(bg, fg, save = true) {
+    document.documentElement.style.setProperty("--reader-bg", bg);
+    document.documentElement.style.setProperty("--reader-fg", fg);
+    if (themeEls.bg) themeEls.bg.value = bg;
+    if (themeEls.fg) themeEls.fg.value = fg;
+    if (save) {
+      localStorage.setItem("lyra_epub_bg", bg);
+      localStorage.setItem("lyra_epub_fg", fg);
+    }
+  }
+  function loadTheme() {
+    const bg = localStorage.getItem("lyra_epub_bg") || DEFAULT_THEME.bg;
+    const fg = localStorage.getItem("lyra_epub_fg") || DEFAULT_THEME.fg;
+    applyTheme(bg, fg, false);
+  }
+  $("themeBtn") && $("themeBtn").addEventListener("click", () => {
+    $("theme").classList.toggle("open");
+  });
+  themeEls.bg && themeEls.bg.addEventListener("input", () => applyTheme(themeEls.bg.value, themeEls.fg.value));
+  themeEls.fg && themeEls.fg.addEventListener("input", () => applyTheme(themeEls.bg.value, themeEls.fg.value));
+  document.querySelectorAll(".swatches button").forEach(b => b.addEventListener("click", () => {
+    applyTheme(b.dataset.bg, b.dataset.fg);
+  }));
+  $("resetTheme") && $("resetTheme").addEventListener("click", () => applyTheme(DEFAULT_THEME.bg, DEFAULT_THEME.fg));
+  loadTheme();
+
   $("file").addEventListener("change", async ev => {
     const file = ev.target.files && ev.target.files[0];
     if (!file) return;
