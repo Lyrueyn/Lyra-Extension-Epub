@@ -61,8 +61,8 @@
   <div id="top">
     <div class="title" id="bookTitle">璃鸢镜 · EPUB 阅读器</div>
     <button id="openBtn" class="primary">打开 EPUB</button>
-    <button id="prevBtn">上一章</button>
-    <button id="nextBtn">下一章</button>
+    <button id="prevBtn">上一页</button>
+    <button id="nextBtn">下一页</button>
     <button id="fontDown">A-</button>
     <button id="fontUp">A+</button>
     <button id="themeBtn" title="配色">🎨</button>
@@ -103,7 +103,8 @@
   const $ = id => document.getElementById(id);
   const state = {
     zip: null, title: "", opfPath: "", opfDir: "", chapters: [],
-    current: -1, bookKey: "", blobUrls: [], fontSize: 18
+    current: -1, bookKey: "", blobUrls: [], fontSize: 22,
+    page: 0, pageCount: 1, pageW: 0, pageH: 0
   };
 
   function setStatus(t) { $("statusText").textContent = t || ""; }
@@ -228,6 +229,54 @@
     return out;
   }
 
+  // ================= ★ 分页：一页一页翻，不靠滚动 =================
+  const PAGE_GAP = 60;
+  function layoutPages(resetPage) {
+    try {
+      const main = $("main"), view = $("view");
+      if (!main || !view || !view.innerHTML) return;
+      const w = Math.max(360, Math.min(860, main.clientWidth - 80));
+      const h = Math.max(260, main.clientHeight - 48);
+      state.pageW = w; state.pageH = h;
+      view.style.width = w + "px";
+      view.style.height = h + "px";
+      view.style.columnWidth = w + "px";
+      view.style.columnGap = PAGE_GAP + "px";
+      view.style.columnFill = "auto";
+      view.style.overflow = "hidden";
+      // 强制 reflow 后再算总宽度
+      void view.offsetWidth;
+      const total = Math.max(w, view.scrollWidth);
+      state.pageCount = Math.max(1, Math.ceil((total + PAGE_GAP) / (w + PAGE_GAP)));
+      if (resetPage) state.page = 0;
+      state.page = Math.max(0, Math.min(state.page, state.pageCount - 1));
+      showPage(state.page);
+    } catch (e) { setStatus("分页失败：" + (e.message || e)); }
+  }
+
+  function showPage(n) {
+    const view = $("view");
+    if (!view) return;
+    state.page = Math.max(0, Math.min(n, state.pageCount - 1));
+    view.scrollLeft = state.page * (state.pageW + PAGE_GAP);
+    const ch = state.chapters[state.current];
+    $("position").textContent = `第 ${state.page + 1} / ${state.pageCount} 页 · 第 ${state.current + 1} / ${state.chapters.length} 章`;
+    if (ch) setStatus("正在阅读：" + ch.title);
+  }
+
+  async function nextPage() {
+    if (state.page < state.pageCount - 1) { showPage(state.page + 1); return; }
+    if (state.current < state.chapters.length - 1) await loadChapter(state.current + 1);
+  }
+
+  async function prevPage() {
+    if (state.page > 0) { showPage(state.page - 1); return; }
+    if (state.current > 0) {
+      await loadChapter(state.current - 1);
+      showPage(state.pageCount - 1);
+    }
+  }
+
   function renderChapterList() {
     const box = $("chapters");
     box.innerHTML = "";
@@ -300,7 +349,6 @@
       wrap.innerHTML = body.innerHTML;
       view.appendChild(wrap);
       view.style.fontSize = state.fontSize + "px";
-      view.scrollTop = 0;
 
       // 章内链接：本书章节则切换
       const chapterPaths = new Set(state.chapters.map(c => c.path));
@@ -321,9 +369,10 @@
       renderChapterList();
       applyTheme(localStorage.getItem("lyra_epub_bg") || DEFAULT_THEME.bg,
                  localStorage.getItem("lyra_epub_fg") || DEFAULT_THEME.fg, false);
-      $("position").textContent = `第 ${idx + 1} / ${state.chapters.length} 章`;
       localStorage.setItem("lyra_epub_idx_" + state.bookKey, String(idx));
-      setStatus("正在阅读：" + ch.title);
+      // 等图片/样式布局后分页
+      setTimeout(() => { layoutPages(true); }, 80);
+      layoutPages(true);
     } catch (e) {
       setStatus("章节载入失败：" + (e.message || e));
     }
@@ -376,6 +425,14 @@
   }));
   $("resetTheme") && $("resetTheme").addEventListener("click", () => applyTheme(DEFAULT_THEME.bg, DEFAULT_THEME.fg));
   loadTheme();
+  (() => {
+    const savedFont = parseInt(localStorage.getItem("lyra_epub_font") || "22", 10);
+    if (savedFont >= 16 && savedFont <= 36) {
+      state.fontSize = savedFont;
+      $("view").style.fontSize = savedFont + "px";
+    }
+  })();
+  window.addEventListener("resize", () => { if (state.current >= 0) layoutPages(false); });
 
   $("file").addEventListener("change", async ev => {
     const file = ev.target.files && ev.target.files[0];
@@ -384,10 +441,20 @@
     catch (e) { setStatus("解析失败：" + (e.message || e)); alert("EPUB 解析失败：" + (e.message || e)); }
     ev.target.value = "";
   });
-  $("prevBtn").addEventListener("click", () => loadChapter(state.current - 1));
-  $("nextBtn").addEventListener("click", () => loadChapter(state.current + 1));
-  $("fontUp").addEventListener("click", () => { state.fontSize = Math.min(32, state.fontSize + 2); $("view").style.fontSize = state.fontSize + "px"; });
-  $("fontDown").addEventListener("click", () => { state.fontSize = Math.max(12, state.fontSize - 2); $("view").style.fontSize = state.fontSize + "px"; });
+  $("prevBtn").addEventListener("click", () => prevPage());
+  $("nextBtn").addEventListener("click", () => nextPage());
+  $("fontUp").addEventListener("click", () => {
+    state.fontSize = Math.min(36, state.fontSize + 2);
+    $("view").style.fontSize = state.fontSize + "px";
+    localStorage.setItem("lyra_epub_font", String(state.fontSize));
+    layoutPages(false);
+  });
+  $("fontDown").addEventListener("click", () => {
+    state.fontSize = Math.max(16, state.fontSize - 2);
+    $("view").style.fontSize = state.fontSize + "px";
+    localStorage.setItem("lyra_epub_font", String(state.fontSize));
+    layoutPages(false);
+  });
   // ★ 璃鸢镜宿主通过 WebView2 消息把 EPUB 发进来（扩展 Tab / 打开 EPUB 文件）
   if (window.chrome && window.chrome.webview) {
     window.chrome.webview.addEventListener("message", async ev => {
@@ -404,8 +471,8 @@
   }
 
   document.addEventListener("keydown", ev => {
-    if (ev.key === "ArrowLeft") loadChapter(state.current - 1);
-    if (ev.key === "ArrowRight") loadChapter(state.current + 1);
+    if (ev.key === "ArrowLeft") prevPage();
+    if (ev.key === "ArrowRight") nextPage();
   });
 })();
 </script>
