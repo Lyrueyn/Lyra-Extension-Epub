@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>璃鸢镜 · EPUB 阅读器</title>
+<style>
+  :root { --bg:#0f0f0f; --panel:#171717; --line:#2a2a2a; --text:#e8e8e8; --sub:#9ba0a5; --pink:#fb7299; --blue:#66ccff; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; background:var(--bg); color:var(--text);
+    font-family:"Microsoft YaHei UI","Microsoft YaHei","Segoe UI",sans-serif; }
+  #app { display:flex; flex-direction:column; height:100%; }
+  #top { height:52px; display:flex; align-items:center; gap:10px; padding:0 14px;
+    background:var(--panel); border-bottom:1px solid var(--line); flex:none; }
+  #top .title { font-size:15px; font-weight:600; margin-right:auto; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  button { background:#33ffffff; color:var(--text); border:0; border-radius:16px;
+    padding:7px 12px; font-size:12px; cursor:pointer; }
+  button.primary { background:var(--pink); color:#fff; }
+  button:hover { filter:brightness(1.15); }
+  #body { flex:1; display:flex; min-height:0; }
+  #side { width:250px; flex:none; background:var(--panel); border-right:1px solid var(--line);
+    overflow:auto; padding:10px 8px; }
+  #side h3 { color:var(--sub); font-size:12px; font-weight:500; margin:6px 8px 10px; }
+  .chapter { display:block; width:100%; text-align:left; padding:8px 9px; border-radius:6px;
+    color:var(--text); font-size:13px; line-height:1.45; background:transparent; }
+  .chapter.active { background:#2a2d33; color:#fff; }
+  #main { flex:1; overflow:auto; }
+  #view { max-width:900px; margin:0 auto; padding:36px 44px 100px; font-size:18px; line-height:1.8; }
+  #view img { max-width:100%; height:auto; }
+  #view a { color:var(--blue); }
+  #view h1,#view h2,#view h3 { line-height:1.35; }
+  #view blockquote { border-left:3px solid var(--pink); margin-left:0; padding-left:14px; color:#bbb; }
+  #view pre, #view code { background:#1f1f1f; color:#ddd; }
+  #empty { display:flex; align-items:center; justify-content:center; height:100%; flex-direction:column; gap:12px; color:var(--sub); }
+  #empty .icon { font-size:48px; }
+  #status { height:24px; background:var(--panel); border-top:1px solid var(--line);
+    color:var(--sub); font-size:11px; display:flex; align-items:center; padding:0 14px;
+    gap:16px; flex:none; }
+  #status .right { margin-left:auto; }
+  #file { display:none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="top">
+    <div class="title" id="bookTitle">璃鸢镜 · EPUB 阅读器</div>
+    <button id="openBtn" class="primary">打开 EPUB</button>
+    <button id="prevBtn">上一章</button>
+    <button id="nextBtn">下一章</button>
+    <button id="fontDown">A-</button>
+    <button id="fontUp">A+</button>
+    <input id="file" type="file" accept=".epub,application/epub+zip"/>
+  </div>
+  <div id="body">
+    <div id="side"><h3>目录</h3><div id="chapters"></div></div>
+    <div id="main">
+      <div id="empty"><div class="icon">📖</div><div>打开一本 EPUB，开始阅读</div>
+        <button id="emptyOpen" class="primary">选择 EPUB 文件</button></div>
+      <div id="view" style="display:none"></div>
+    </div>
+  </div>
+  <div id="status"><span id="statusText">就绪</span><span class="right" id="position"></span></div>
+</div>
+<script src="lib/jszip.min.js"></script>
+<script>
+(() => {
+  "use strict";
+  const $ = id => document.getElementById(id);
+  const state = {
+    zip: null, title: "", opfPath: "", opfDir: "", chapters: [],
+    current: -1, bookKey: "", blobUrls: [], fontSize: 18
+  };
+
+  function setStatus(t) { $("statusText").textContent = t || ""; }
+  function dirOf(p) { const i = p.lastIndexOf("/"); return i >= 0 ? p.slice(0, i) : ""; }
+  function stripFrag(p) { const i = p.indexOf("#"); return i >= 0 ? p.slice(0, i) : p; }
+  function fragOf(p) { const i = p.indexOf("#"); return i >= 0 ? p.slice(i + 1) : ""; }
+  function norm(p) {
+    const out = [];
+    for (const part of String(p || "").replaceAll("\\", "/").split("/")) {
+      if (!part || part === ".") continue;
+      if (part === "..") out.pop(); else out.push(part);
+    }
+    return out.join("/");
+  }
+  function resolve(base, href) {
+    if (!href) return "";
+    if (/^[a-z]+:/i.test(href)) return href;
+    if (href.startsWith("/")) return norm(href.slice(1));
+    return norm((base ? base + "/" : "") + href);
+  }
+  function xmlDoc(text) { return new DOMParser().parseFromString(text, "application/xml"); }
+  function byLocal(root, name) {
+    return Array.from(root.getElementsByTagName("*")).filter(e => e.localName === name);
+  }
+  function firstLocal(root, name) { const a = byLocal(root, name); return a.length ? a[0] : null; }
+  function textOf(el) { return el ? (el.textContent || "").trim() : ""; }
+
+  async function readText(path) {
+    const f = state.zip && state.zip.file(path);
+    if (!f) return null;
+    try { return await f.async("string"); } catch { return null; }
+  }
+
+  function clearBlobs() {
+    for (const u of state.blobUrls) { try { URL.revokeObjectURL(u); } catch {} }
+    state.blobUrls = [];
+  }
+
+  async function parseBook(file) {
+    state.zip = await JSZip.loadAsync(file);
+    state.bookKey = file.name + ":" + file.size;
+    const container = await readText("META-INF/container.xml");
+    if (!container) throw new Error("缺少 META-INF/container.xml");
+    const cdoc = xmlDoc(container);
+    const rootfile = firstLocal(cdoc, "rootfile");
+    const opfPath = rootfile ? rootfile.getAttribute("full-path") : "";
+    if (!opfPath) throw new Error("找不到 OPF");
+    state.opfPath = norm(opfPath);
+    state.opfDir = dirOf(state.opfPath);
+    const opf = await readText(state.opfPath);
+    if (!opf) throw new Error("OPF 读取失败");
+    const odoc = xmlDoc(opf);
+    state.title = textOf(firstLocal(odoc, "title")) || file.name.replace(/\.epub$/i, "");
+
+    const items = {};
+    let navId = "", ncxId = "";
+    for (const it of byLocal(odoc, "item")) {
+      const id = it.getAttribute("id") || "", href = it.getAttribute("href") || "";
+      if (!id || !href) continue;
+      items[id] = { href, media: it.getAttribute("media-type") || "", props: it.getAttribute("properties") || "" };
+      if (items[id].props.split(/\s+/).includes("nav")) navId = id;
+    }
+    const spine = firstLocal(odoc, "spine");
+    const spineIds = spine ? byLocal(spine, "itemref").map(e => e.getAttribute("idref") || "").filter(Boolean) : [];
+    if (spine) ncxId = spine.getAttribute("toc") || "";
+
+    let toc = [];
+    if (navId && items[navId]) toc = await parseNav(resolve(state.opfDir, items[navId].href));
+    if (!toc.length && ncxId && items[ncxId]) toc = await parseNcx(resolve(state.opfDir, items[ncxId].href));
+    if (!toc.length) {
+      for (const id of spineIds) {
+        if (!items[id]) continue;
+        const rel = resolve(state.opfDir, items[id].href);
+        toc.push({ href: rel, title: rel.split("/").pop().replace(/\.[^.]+$/, "") });
+      }
+    }
+    state.chapters = toc.map(t => ({ title: t.title, href: t.href, path: stripFrag(t.href) }))
+      .filter(c => state.zip.file(c.path));
+    if (!state.chapters.length) throw new Error("没有找到可读章节");
+    renderChapterList();
+    $("bookTitle").textContent = state.title;
+    $("empty").style.display = "none";
+    $("view").style.display = "block";
+    const saved = parseInt(localStorage.getItem("lyra_epub_idx_" + state.bookKey) || "0", 10) || 0;
+    await loadChapter(Math.max(0, Math.min(saved, state.chapters.length - 1)));
+  }
+
+  async function parseNav(navPath) {
+    const text = await readText(navPath);
+    if (!text) return [];
+    const doc = new DOMParser().parseFromString(text, "text/html");
+    const navDir = dirOf(navPath);
+    let anchors = Array.from(doc.querySelectorAll("nav a"));
+    if (!anchors.length) anchors = Array.from(doc.querySelectorAll("a"));
+    const out = [];
+    for (const a of anchors) {
+      const href = a.getAttribute("href") || "";
+      if (!href || /^https?:/i.test(href)) continue;
+      const title = (a.textContent || "").trim() || "章节";
+      out.push({ title, href: resolve(navDir, href) });
+    }
+    return out;
+  }
+
+  async function parseNcx(ncxPath) {
+    const text = await readText(ncxPath);
+    if (!text) return [];
+    const doc = xmlDoc(text);
+    const dir = dirOf(ncxPath);
+    const out = [];
+    for (const nav of byLocal(doc, "navPoint")) {
+      const label = textOf(firstLocal(nav, "text")) || "章节";
+      const content = firstLocal(nav, "content");
+      const src = content ? content.getAttribute("src") : "";
+      if (src) out.push({ title: label, href: resolve(dir, src) });
+    }
+    return out;
+  }
+
+  function renderChapterList() {
+    const box = $("chapters");
+    box.innerHTML = "";
+    state.chapters.forEach((c, i) => {
+      const b = document.createElement("button");
+      b.className = "chapter" + (i === state.current ? " active" : "");
+      b.textContent = c.title;
+      b.addEventListener("click", () => loadChapter(i));
+      box.appendChild(b);
+    });
+  }
+
+  function inlineCss(css, baseDir) {
+    // 把 CSS 里的相对 url(...) 尽量改写成 blob；失败就保留原样
+    return css.replace(/url\(([^)]+)\)/gi, (m, raw) => {
+      let u = raw.trim().replace(/^['"]|['"]$/g, "");
+      if (/^data:|^blob:|^https?:/i.test(u)) return m;
+      const p = resolve(baseDir, u);
+      const f = state.zip.file(p);
+      if (!f) return m;
+      return `url("__EPUB_BLOB__${p}")`;
+    });
+  }
+
+  async function loadChapter(idx) {
+    if (!state.zip || idx < 0 || idx >= state.chapters.length) return;
+    state.current = idx;
+    clearBlobs();
+    const ch = state.chapters[idx];
+    setStatus("正在载入：" + ch.title);
+    try {
+      const html = await readText(ch.path);
+      if (html == null) throw new Error("章节文件不存在");
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const body = doc.body || doc.documentElement;
+      // 去掉脚本
+      body.querySelectorAll("script").forEach(e => e.remove());
+
+      // 内联 stylesheet
+      const styles = [];
+      for (const link of Array.from(doc.querySelectorAll('link[rel~="stylesheet"]'))) {
+        const href = link.getAttribute("href") || "";
+        const p = resolve(dirOf(ch.path), href);
+        const css = await readText(p);
+        if (css) styles.push(inlineCss(css, dirOf(p)));
+      }
+
+      // 图片等资源 → blob
+      const imgs = Array.from(body.querySelectorAll("img,image,source,audio,video"));
+      for (const el of imgs) {
+        const attr = el.getAttribute("src") ? "src" : (el.getAttribute("xlink:href") ? "xlink:href" : "");
+        if (!attr) continue;
+        const raw = el.getAttribute(attr);
+        if (!raw || /^data:|^https?:|^blob:/i.test(raw)) continue;
+        const p = resolve(dirOf(ch.path), raw);
+        const f = state.zip.file(p);
+        if (!f) continue;
+        const blob = await f.async("blob");
+        const url = URL.createObjectURL(blob);
+        state.blobUrls.push(url);
+        el.setAttribute(attr, url);
+      }
+
+      const view = $("view");
+      view.innerHTML = "";
+      const style = document.createElement("style");
+      style.textContent = styles.join("\n");
+      view.appendChild(style);
+      const wrap = document.createElement("div");
+      wrap.innerHTML = body.innerHTML;
+      view.appendChild(wrap);
+      view.style.fontSize = state.fontSize + "px";
+      view.scrollTop = 0;
+
+      // 章内链接：本书章节则切换
+      const chapterPaths = new Set(state.chapters.map(c => c.path));
+      for (const a of Array.from(wrap.querySelectorAll("a[href]"))) {
+        const raw = a.getAttribute("href");
+        if (!raw || /^https?:/i.test(raw)) continue;
+        const target = resolve(dirOf(ch.path), raw);
+        const path = stripFrag(target), frag = fragOf(target);
+        a.addEventListener("click", ev => {
+          ev.preventDefault();
+          const ti = state.chapters.findIndex(c => c.path === path);
+          if (ti >= 0) loadChapter(ti).then(() => {
+            if (frag) { const el = document.getElementById(frag) || document.querySelector('[name="' + CSS.escape(frag) + '"]'); if (el) el.scrollIntoView(); }
+          });
+        });
+      }
+
+      renderChapterList();
+      $("position").textContent = `第 ${idx + 1} / ${state.chapters.length} 章`;
+      localStorage.setItem("lyra_epub_idx_" + state.bookKey, String(idx));
+      setStatus("正在阅读：" + ch.title);
+    } catch (e) {
+      setStatus("章节载入失败：" + (e.message || e));
+    }
+  }
+
+  function openPicker() { $("file").click(); }
+  $("openBtn").addEventListener("click", openPicker);
+  $("emptyOpen").addEventListener("click", openPicker);
+  $("file").addEventListener("change", async ev => {
+    const file = ev.target.files && ev.target.files[0];
+    if (!file) return;
+    try { setStatus("正在解析 EPUB…"); await parseBook(file); }
+    catch (e) { setStatus("解析失败：" + (e.message || e)); alert("EPUB 解析失败：" + (e.message || e)); }
+    ev.target.value = "";
+  });
+  $("prevBtn").addEventListener("click", () => loadChapter(state.current - 1));
+  $("nextBtn").addEventListener("click", () => loadChapter(state.current + 1));
+  $("fontUp").addEventListener("click", () => { state.fontSize = Math.min(32, state.fontSize + 2); $("view").style.fontSize = state.fontSize + "px"; });
+  $("fontDown").addEventListener("click", () => { state.fontSize = Math.max(12, state.fontSize - 2); $("view").style.fontSize = state.fontSize + "px"; });
+  document.addEventListener("keydown", ev => {
+    if (ev.key === "ArrowLeft") loadChapter(state.current - 1);
+    if (ev.key === "ArrowRight") loadChapter(state.current + 1);
+  });
+})();
+</script>
+</body>
+</html>
