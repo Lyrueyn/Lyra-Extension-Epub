@@ -81,8 +81,8 @@
   <div id="top">
     <div class="title" id="bookTitle">璃鸢镜 · EPUB 阅读器</div>
     <button id="openBtn" class="primary">打开 EPUB</button>
-    <button id="prevBtn">上一页</button>
-    <button id="nextBtn">下一页</button>
+    <button id="prevBtn">上一章</button>
+    <button id="nextBtn">下一章</button>
     <button id="fontDown">A-</button>
     <button id="fontUp">A+</button>
     <button id="themeBtn" title="配色">🎨</button>
@@ -457,8 +457,8 @@
     catch (e) { setStatus("解析失败：" + (e.message || e)); alert("EPUB 解析失败：" + (e.message || e)); }
     ev.target.value = "";
   });
-  $("prevBtn").addEventListener("click", () => prevPage());
-  $("nextBtn").addEventListener("click", () => nextPage());
+  $("prevBtn").addEventListener("click", () => loadChapter(state.current - 1));
+  $("nextBtn").addEventListener("click", () => loadChapter(state.current + 1));
   $("fontUp").addEventListener("click", () => {
     state.fontSize = Math.min(36, state.fontSize + 2);
     $("view").style.fontSize = state.fontSize + "px";
@@ -485,6 +485,23 @@
       } catch (e) { setStatus("打开发来的 EPUB 失败：" + (e.message || e)); }
     });
   }
+
+  // ★ 正文区域：左键点一下 = 下一页；右键 = 上一页
+  (() => {
+    const area = $("main");
+    if (!area) return;
+    area.addEventListener("click", ev => {
+      if (ev.button !== 0) return;
+      if (ev.target && ev.target.closest && ev.target.closest("a")) return;   // 点链接仍然跳链接
+      const sel = window.getSelection ? window.getSelection() : null;
+      if (sel && String(sel).trim().length > 0) return;                      // 选字时不翻页
+      nextPage();
+    });
+    area.addEventListener("contextmenu", ev => {
+      ev.preventDefault();                                                    // 右键 = 上一页，不弹菜单
+      prevPage();
+    });
+  })();
 
   document.addEventListener("keydown", ev => {
     if (ev.key === "ArrowLeft") prevPage();
