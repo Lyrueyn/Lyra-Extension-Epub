@@ -293,6 +293,21 @@
     }
   }
 
+  // ★ 宿主把 EPUB 复制到同源目录并通过 ?book=book.epub 传入（比 WebView2 消息更稳）
+  (async () => {
+    try {
+      const book = new URLSearchParams(location.search).get("book");
+      if (!book) return;
+      setStatus("正在打开书库 EPUB…");
+      const resp = await fetch(book, { cache: "no-store" });
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      const buf = await resp.arrayBuffer();
+      await parseBookData(buf, "book.epub", buf.byteLength);
+    } catch (e) { setStatus("打开书库 EPUB 失败：" + (e.message || e)); }
+  })();
+
+  window.lyraParseBookData = parseBookData;   // 供宿主 ExecuteScript 调用
+
   function openPicker() { $("file").click(); }
   $("openBtn").addEventListener("click", openPicker);
   $("emptyOpen").addEventListener("click", openPicker);
