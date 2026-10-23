@@ -322,7 +322,7 @@
   $("nextBtn").addEventListener("click", () => loadChapter(state.current + 1));
   $("fontUp").addEventListener("click", () => { state.fontSize = Math.min(32, state.fontSize + 2); $("view").style.fontSize = state.fontSize + "px"; });
   $("fontDown").addEventListener("click", () => { state.fontSize = Math.max(12, state.fontSize - 2); $("view").style.fontSize = state.fontSize + "px"; });
-'  // ★ 璃鸢镜宿主通过 WebView2 消息把 EPUB 发进来（扩展 Tab / 打开 EPUB 文件）
+  // ★ 璃鸢镜宿主通过 WebView2 消息把 EPUB 发进来（扩展 Tab / 打开 EPUB 文件）
   if (window.chrome && window.chrome.webview) {
     window.chrome.webview.addEventListener("message", async ev => {
       try {
@@ -337,7 +337,7 @@
     });
   }
 
-'  document.addEventListener("keydown", ev => {
+  document.addEventListener("keydown", ev => {
     if (ev.key === "ArrowLeft") loadChapter(state.current - 1);
     if (ev.key === "ArrowRight") loadChapter(state.current + 1);
   });
