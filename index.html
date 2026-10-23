@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"/>
@@ -109,8 +109,13 @@
   }
 
   async function parseBook(file) {
-    state.zip = await JSZip.loadAsync(file);
-    state.bookKey = file.name + ":" + file.size;
+    const data = await file.arrayBuffer();
+    return parseBookData(data, file.name, file.size);
+  }
+
+  async function parseBookData(data, fileName, fileSize) {
+    state.zip = await JSZip.loadAsync(data);
+    state.bookKey = fileName + ":" + (fileSize || data.byteLength);
     const container = await readText("META-INF/container.xml");
     if (!container) throw new Error("缺少 META-INF/container.xml");
     const cdoc = xmlDoc(container);
@@ -122,7 +127,7 @@
     const opf = await readText(state.opfPath);
     if (!opf) throw new Error("OPF 读取失败");
     const odoc = xmlDoc(opf);
-    state.title = textOf(firstLocal(odoc, "title")) || file.name.replace(/\.epub$/i, "");
+    state.title = textOf(firstLocal(odoc, "title")) || String(fileName || "EPUB").replace(/\.epub$/i, "");
 
     const items = {};
     let navId = "", ncxId = "";
@@ -302,7 +307,22 @@
   $("nextBtn").addEventListener("click", () => loadChapter(state.current + 1));
   $("fontUp").addEventListener("click", () => { state.fontSize = Math.min(32, state.fontSize + 2); $("view").style.fontSize = state.fontSize + "px"; });
   $("fontDown").addEventListener("click", () => { state.fontSize = Math.max(12, state.fontSize - 2); $("view").style.fontSize = state.fontSize + "px"; });
-  document.addEventListener("keydown", ev => {
+'  // ★ 璃鸢镜宿主通过 WebView2 消息把 EPUB 发进来（扩展 Tab / 打开 EPUB 文件）
+  if (window.chrome && window.chrome.webview) {
+    window.chrome.webview.addEventListener("message", async ev => {
+      try {
+        const d = ev.data;
+        if (!d || d.type !== "openBook" || !d.data) return;
+        setStatus("正在打开宿主发来的 EPUB…");
+        const bin = atob(d.data);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        await parseBookData(bytes.buffer, d.name || "book.epub", bytes.length);
+      } catch (e) { setStatus("打开发来的 EPUB 失败：" + (e.message || e)); }
+    });
+  }
+
+'  document.addEventListener("keydown", ev => {
     if (ev.key === "ArrowLeft") loadChapter(state.current - 1);
     if (ev.key === "ArrowRight") loadChapter(state.current + 1);
   });
