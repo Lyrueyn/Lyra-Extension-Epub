@@ -26,12 +26,37 @@
   .chapter { display:block; width:100%; text-align:left; padding:8px 9px; border-radius:6px;
     color:var(--text); font-size:13px; line-height:1.45; background:transparent; }
   .chapter.active { background:#2a2d33; color:#fff; }
-  #main { flex:1; overflow:auto; background:var(--reader-bg); }
-  #view { max-width:900px; margin:0 auto; padding:36px 44px 100px; font-size:18px; line-height:1.8;
-    background:var(--reader-bg); color:var(--reader-fg); }
+  #main { flex:1; overflow:hidden; background:var(--reader-bg); display:flex; align-items:center;
+    justify-content:center; padding:24px 40px; }
+  #view { max-width:none; margin:0; padding:0; font-size:22px; line-height:1.95;
+    background:var(--reader-bg); color:var(--reader-fg);
+    column-fill:auto; overflow:hidden; }
   #view, #view * { color:var(--reader-fg) !important; }
-  #view a { color:var(--blue) !important; }
-  #view img { max-width:100%; height:auto; }
+  #view p { margin:0 0 1.05em; text-indent:2em; }
+  #view h1 { font-size:1.65em !important; margin:0 0 .8em; }
+  #view h2 { font-size:1.4em !important; margin:0 0 .7em; }
+  #view h3 { font-size:1.2em !important; margin:0 0 .6em; }
+  #view h4, #view h5, #view h6 { font-size:1.05em !important; margin:0 0 .5em; }
+  #view img { max-width:100%; max-height:calc(100% - 20px); height:auto; background:transparent !important; }
+  #view *:not(img):not(image) {
+    background:transparent !important;
+    background-color:transparent !important;
+    background-image:none !important;
+    border-color:#333 !important;
+    box-shadow:none !important;
+    font-family:inherit !important;
+    font-size:inherit !important;
+    line-height:inherit !important;
+    max-width:100% !important;
+    float:none !important;
+  }
+  #view a { color:var(--blue) !important; text-decoration:underline !important; }
+  #view table { width:100% !important; border-collapse:collapse !important; margin:0 0 1em; }
+  #view td, #view th { padding:5px 8px !important; border-bottom:1px solid #333 !important; vertical-align:top; }
+  #view ul, #view ol { padding-left:1.6em; }
+  #view li { margin:0 0 .35em; }
+  #view blockquote { margin:0 0 1em; padding-left:14px; border-left:3px solid var(--pink) !important; }
+  #view::-webkit-scrollbar, #main::-webkit-scrollbar { display:none; }
   #theme { width:0; overflow:hidden; transition:width .18s; background:var(--panel); border-left:1px solid var(--line); }
   #theme.open { width:240px; }
   #theme .inner { width:240px; padding:14px 14px 20px; display:flex; flex-direction:column; gap:12px; }
@@ -42,11 +67,6 @@
   .swatches { display:flex; flex-wrap:wrap; gap:6px; }
   .swatches button { padding:6px 8px; border-radius:8px; font-size:11px; }
   #themeBtn { min-width:44px; }
-  #view img { max-width:100%; height:auto; }
-  #view a { color:var(--blue); }
-  #view h1,#view h2,#view h3 { line-height:1.35; }
-  #view blockquote { border-left:3px solid var(--pink); margin-left:0; padding-left:14px; color:#bbb; }
-  #view pre, #view code { background:#1f1f1f; color:#ddd; }
   #empty { display:flex; align-items:center; justify-content:center; height:100%; flex-direction:column; gap:12px; color:var(--sub); }
   #empty .icon { font-size:48px; }
   #status { height:24px; background:var(--panel); border-top:1px solid var(--line);
@@ -186,8 +206,10 @@
         toc.push({ href: rel, title: rel.split("/").pop().replace(/\.[^.]+$/, "") });
       }
     }
+    const frontMatter = /^(封面|目录|版权|书名|扉页|contents|cover|copyright|titlepage|toc)\b/i;
     state.chapters = toc.map(t => ({ title: t.title, href: t.href, path: stripFrag(t.href) }))
-      .filter(c => state.zip.file(c.path));
+      .filter(c => state.zip.file(c.path))
+      .filter(c => !frontMatter.test((c.title || "").trim()));
     if (!state.chapters.length) throw new Error("没有找到可读章节");
     renderChapterList();
     $("bookTitle").textContent = state.title;
@@ -313,16 +335,10 @@
       const doc = new DOMParser().parseFromString(html, "text/html");
       const body = doc.body || doc.documentElement;
       // 去掉脚本
-      body.querySelectorAll("script").forEach(e => e.remove());
+      body.querySelectorAll("script,style,link").forEach(e => e.remove());
 
-      // 内联 stylesheet
+      // ★ 阅读器统一排版：不加载出版社 CSS（它们常带白底/黑字/小字/多列，导致阅读页莫名其妙）
       const styles = [];
-      for (const link of Array.from(doc.querySelectorAll('link[rel~="stylesheet"]'))) {
-        const href = link.getAttribute("href") || "";
-        const p = resolve(dirOf(ch.path), href);
-        const css = await readText(p);
-        if (css) styles.push(inlineCss(css, dirOf(p)));
-      }
 
       // 图片等资源 → blob
       const imgs = Array.from(body.querySelectorAll("img,image,source,audio,video"));
