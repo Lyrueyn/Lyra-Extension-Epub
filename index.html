@@ -57,6 +57,15 @@
   #view li { margin:0 0 .35em; }
   #view blockquote { margin:0 0 1em; padding-left:14px; border-left:3px solid var(--pink) !important; }
   #view::-webkit-scrollbar, #main::-webkit-scrollbar { display:none; }
+  html:not(.allow-select) #view, html:not(.allow-select) #view * {
+    user-select:none !important; -webkit-user-select:none !important;
+  }
+  html.allow-select #view, html.allow-select #view * {
+    user-select:text !important; -webkit-user-select:text !important;
+  }
+  .toggle-row { display:flex; align-items:center; justify-content:space-between; gap:8px;
+    color:var(--text); font-size:12px; }
+  .toggle-row input[type=checkbox] { width:16px; height:16px; accent-color:var(--pink); }
   #theme { width:0; overflow:hidden; transition:width .18s; background:var(--panel); border-left:1px solid var(--line); }
   #theme.open { width:240px; }
   #theme .inner { width:240px; padding:14px 14px 20px; display:flex; flex-direction:column; gap:12px; }
@@ -108,6 +117,8 @@
           <button data-bg="#0A0F1C" data-fg="#B8D4FF">夜蓝</button>
         </div>
         <button id="resetTheme">恢复默认</button>
+        <label class="toggle-row"><span>允许选择文字</span>
+          <input type="checkbox" id="selectToggle"/></label>
         <div style="color:var(--sub);font-size:11px;line-height:1.6">
           颜色会记住；书自带的黑色字/背景会被这里的设置覆盖。
         </div>
@@ -441,6 +452,18 @@
   }));
   $("resetTheme") && $("resetTheme").addEventListener("click", () => applyTheme(DEFAULT_THEME.bg, DEFAULT_THEME.fg));
   loadTheme();
+  // ★ “允许选择文字”开关：默认关（避免快速点击翻页时变成双击选字），需要复制时再打开
+  (() => {
+    const toggle = $("selectToggle");
+    const saved = localStorage.getItem("lyra_epub_selectable");
+    function applySelectable(v) {
+      document.documentElement.classList.toggle("allow-select", !!v);
+      if (toggle) toggle.checked = !!v;
+      localStorage.setItem("lyra_epub_selectable", v ? "1" : "0");
+    }
+    applySelectable(saved === "1");   // 默认 false
+    if (toggle) toggle.addEventListener("change", () => applySelectable(toggle.checked));
+  })();
   (() => {
     const savedFont = parseInt(localStorage.getItem("lyra_epub_font") || "22", 10);
     if (savedFont >= 16 && savedFont <= 36) {
