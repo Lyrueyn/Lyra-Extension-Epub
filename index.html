@@ -21,10 +21,11 @@
   button:hover { filter:brightness(1.15); }
   #body { flex:1; display:flex; min-height:0; }
   #side { width:250px; flex:none; background:var(--panel); border-right:1px solid var(--line);
-    overflow:auto; padding:10px 8px; }
+    overflow-y:auto; overflow-x:hidden; padding:10px 8px; }
   #side h3 { color:var(--sub); font-size:12px; font-weight:500; margin:6px 8px 10px; }
   .chapter { display:block; width:100%; text-align:left; padding:8px 9px; border-radius:6px;
-    color:var(--text); font-size:13px; line-height:1.45; background:transparent; }
+    color:var(--text); font-size:13px; line-height:1.45; background:transparent;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .chapter.active { background:#2a2d33; color:#fff; }
   #main { flex:1; overflow:hidden; background:#080808; display:flex; align-items:center;
     justify-content:center; padding:24px 40px; }
@@ -100,10 +101,10 @@
     from { opacity:.15; transform:translateX(-100%); }
     to   { opacity:1; transform:none; }
   }
-  #chapterLayer.chapter-out-next { animation:chapterOutNext 160ms ease-in forwards; }
-  #chapterLayer.chapter-out-prev { animation:chapterOutPrev 160ms ease-in forwards; }
-  #chapterLayer.chapter-next { animation:chapterInNext 220ms cubic-bezier(.2,.8,.2,1); }
-  #chapterLayer.chapter-prev { animation:chapterInPrev 220ms cubic-bezier(.2,.8,.2,1); }
+  #chapterLayer.chapter-out-next { animation:chapterOutNext 120ms ease-in forwards; }
+  #chapterLayer.chapter-out-prev { animation:chapterOutPrev 120ms ease-in forwards; }
+  #chapterLayer.chapter-next { animation:chapterInNext 170ms cubic-bezier(.2,.8,.2,1); }
+  #chapterLayer.chapter-prev { animation:chapterInPrev 170ms cubic-bezier(.2,.8,.2,1); }
   #view { will-change:scroll-position; }
   #empty { display:flex; align-items:center; justify-content:center; height:100%; flex-direction:column; gap:12px; color:var(--sub); }
   #empty .icon { font-size:48px; }
@@ -363,7 +364,32 @@
     requestAnimationFrame(tick);
   }
 
-  let pageAnimToken = 0;
+  const pageAnim = { active: false, from: 0, to: 0, start: 0, raf: 0 };
+  function animatePageTo(target) {
+    const view = $("view");
+    if (!view) return;
+    pageAnim.from = view.scrollLeft;
+    pageAnim.to = target;
+    pageAnim.start = performance.now();
+    if (!pageAnim.active) {
+      pageAnim.active = true;
+      const dur = 130;   // 快一点，减少晃眼
+      const tick = (t) => {
+        const p = Math.min(1, (t - pageAnim.start) / dur);
+        const eased = 1 - Math.pow(1 - p, 3);
+        view.scrollLeft = pageAnim.from + (pageAnim.to - pageAnim.from) * eased;
+        if (p < 1) {
+          pageAnim.raf = requestAnimationFrame(tick);
+        } else {
+          view.scrollLeft = pageAnim.to;
+          pageAnim.active = false;
+          pageAnim.raf = 0;
+        }
+      };
+      pageAnim.raf = requestAnimationFrame(tick);
+    }
+  }
+
   function showPage(n, animate = true) {
     const view = $("view");
     if (!view) return;
@@ -371,29 +397,9 @@
     const next = Math.max(0, Math.min(n, state.pageCount - 1));
     state.page = next;
     const targetLeft = state.page * (state.pageW + PAGE_GAP);
-    if (animate && prev !== next) {
-      const token = ++pageAnimToken;
-      const from = view.scrollLeft;
-      const t0 = performance.now();
-      const dur = Math.min(300, 170 + Math.abs(targetLeft - from) / 5);
-      const tick = (t) => {
-        if (token !== pageAnimToken) return;
-        const p = Math.min(1, (t - t0) / dur);
-        const eased = 1 - Math.pow(1 - p, 3);
-        view.scrollLeft = from + (targetLeft - from) * eased;
-        if (p < 1) requestAnimationFrame(tick);
-      };
-      requestAnimationFrame(tick);
-    } else {
-      pageAnimToken++;
-      view.scrollLeft = targetLeft;
-    }
-    // ★ 刚翻页后一段时间内持续钉住当前页，避免图片/字体/尺寸异步重排把 scrollLeft 归零
-    if (animate && prev !== next) {
-      setTimeout(() => lockPageScroll(state.page, 1400), 320);
-    } else {
-      lockPageScroll(state.page, 1400);
-    }
+    if (animate && prev !== next) animatePageTo(targetLeft);
+    else { view.scrollLeft = targetLeft; pageAnim.active = false; }
+    setTimeout(() => lockPageScroll(state.page, 1400), 200);
     const ch = state.chapters[state.current];
     $("position").textContent = `第 ${state.page + 1} / ${state.pageCount} 页 · 第 ${state.current + 1} / ${state.chapters.length} 章`;
     if (ch) setStatus("正在阅读：" + ch.title + "（左键下一页 / 右键上一页）");
