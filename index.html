@@ -79,16 +79,26 @@
   .swatches button { padding:6px 8px; border-radius:8px; font-size:11px; }
   #themeBtn { min-width:44px; }
   #view { will-change:scroll-position; }
-  @keyframes chapterSlideNext {
-    from { opacity:.35; transform:translateX(100%); }
+  @keyframes chapterOutNext {
+    from { opacity:1; transform:none; }
+    to   { opacity:.15; transform:translateX(-100%); }
+  }
+  @keyframes chapterOutPrev {
+    from { opacity:1; transform:none; }
+    to   { opacity:.15; transform:translateX(100%); }
+  }
+  @keyframes chapterInNext {
+    from { opacity:.15; transform:translateX(100%); }
     to   { opacity:1; transform:none; }
   }
-  @keyframes chapterSlidePrev {
-    from { opacity:.35; transform:translateX(-100%); }
+  @keyframes chapterInPrev {
+    from { opacity:.15; transform:translateX(-100%); }
     to   { opacity:1; transform:none; }
   }
-  #view.chapter-next { animation:chapterSlideNext 260ms cubic-bezier(.2,.8,.2,1); }
-  #view.chapter-prev { animation:chapterSlidePrev 260ms cubic-bezier(.2,.8,.2,1); }
+  #view.chapter-out-next { animation:chapterOutNext 160ms ease-in forwards; }
+  #view.chapter-out-prev { animation:chapterOutPrev 160ms ease-in forwards; }
+  #view.chapter-next { animation:chapterInNext 220ms cubic-bezier(.2,.8,.2,1); }
+  #view.chapter-prev { animation:chapterInPrev 220ms cubic-bezier(.2,.8,.2,1); }
   #view { will-change:scroll-position; }
   #empty { display:flex; align-items:center; justify-content:center; height:100%; flex-direction:column; gap:12px; color:var(--sub); }
   #empty .icon { font-size:48px; }
@@ -377,6 +387,15 @@
   async function loadChapter(idx, targetPage = null) {
     if (!state.zip || idx < 0 || idx >= state.chapters.length) return;
     const prevChapter = state.current;
+    const chapterView = $("view");
+    const dir = idx >= prevChapter ? 1 : -1;
+    if (prevChapter >= 0 && prevChapter !== idx && chapterView) {
+      // ★ 旧章节先平移出（否则只看得到新章节平移入）
+      chapterView.classList.remove("chapter-next", "chapter-prev", "chapter-out-next", "chapter-out-prev");
+      void chapterView.offsetWidth;
+      chapterView.classList.add(dir > 0 ? "chapter-out-next" : "chapter-out-prev");
+      await new Promise(r => setTimeout(r, 165));
+    }
     state.current = idx;
     clearBlobs();
     const ch = state.chapters[idx];
@@ -445,10 +464,11 @@
         layoutPages(false);
         if (targetPage === "last") showPage(state.pageCount - 1, false);
       }, 80);
-      if (prevChapter !== idx) {
+      if (prevChapter >= 0 && prevChapter !== idx) {
+        view.classList.remove("chapter-out-next", "chapter-out-prev");
         view.classList.remove("chapter-next", "chapter-prev");
         void view.offsetWidth;
-        view.classList.add(idx > prevChapter ? "chapter-next" : "chapter-prev");
+        view.classList.add(dir > 0 ? "chapter-next" : "chapter-prev");
       }
     } catch (e) {
       setStatus("章节载入失败：" + (e.message || e));
