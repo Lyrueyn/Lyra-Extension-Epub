@@ -347,6 +347,15 @@
       pageAnimToken++;
       view.scrollLeft = targetLeft;
     }
+    // ★ 最终位置校正：异步图片/字体导致 reflow 时，浏览器可能把 scrollLeft 归零
+    const expectedPage = state.page;
+    const wantLeft = expectedPage * (state.pageW + PAGE_GAP);
+    setTimeout(() => {
+      try {
+        if (state.page === expectedPage && view && Math.abs(view.scrollLeft - wantLeft) > 2)
+          view.scrollLeft = wantLeft;
+      } catch { }
+    }, 360);
     const ch = state.chapters[state.current];
     $("position").textContent = `第 ${state.page + 1} / ${state.pageCount} 页 · 第 ${state.current + 1} / ${state.chapters.length} 章`;
     if (ch) setStatus("正在阅读：" + ch.title + "（左键下一页 / 右键上一页）");
@@ -592,7 +601,7 @@
     if (!area) return;
     area.addEventListener("click", ev => {
       if (ev.button !== 0) return;
-      // ★ 点击正文任意位置都翻下一页；不再因为点在链接上或残留选区而失效
+      if (ev.target && ev.target.closest && ev.target.closest("a")) return;   // 链接交给链接自身处理，避免双重跳转
       nextPage();
     });
     area.addEventListener("contextmenu", ev => {
