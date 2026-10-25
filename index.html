@@ -165,7 +165,7 @@
     zip: null, title: "", opfPath: "", opfDir: "", chapters: [],
     current: -1, bookKey: "", blobUrls: [], fontSize: 22,
     page: 0, pageCount: 1, pageW: 0, pageH: 0, ready: false,
-    opening: false, pendingTurn: null, clickBlockedUntil: 0
+    opening: false, pendingTurn: null, clickBlockedUntil: 0, bookLoaded: false
   };
 
   function setStatus(t) { $("statusText").textContent = t || ""; }
@@ -210,6 +210,7 @@
   }
 
   async function parseBookData(data, fileName, fileSize) {
+    if (state.bookLoaded && fileName === "book.epub") return;   // 宿主可能重复投喂，同一本书只解析一次
     state.ready = false;
     state.zip = await JSZip.loadAsync(data);
     state.bookKey = fileName + ":" + (fileSize || data.byteLength);
@@ -262,7 +263,7 @@
     state.opening = true;
     state.pendingTurn = null;
     state.ready = false;
-    state.clickBlockedUntil = performance.now() + 700;    // 打开阶段短暂防误触
+    state.clickBlockedUntil = 0;
     await loadChapter(Math.max(0, Math.min(saved, state.chapters.length - 1)));
     // ★ 打开后 1.5 秒内布局/窗口/字体还在稳定；此时点击不翻页，也不排队补翻
     state.ready = false;
@@ -270,9 +271,10 @@
       try { layoutPages(false); } catch { }
       state.ready = true;
       state.opening = false;
-      state.clickBlockedUntil = performance.now() + 200;
+      state.clickBlockedUntil = 0;
       try { if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage("lyra-book-ready"); } catch { }
     }, 300);
+    state.bookLoaded = true;
   }
 
   async function parseNav(navPath) {
