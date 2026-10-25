@@ -369,32 +369,24 @@
     requestAnimationFrame(tick);
   }
 
-  const pageAnim = { active: false, from: 0, to: 0, start: 0, raf: 0 };
+  const pageAnim = { target: 0, running: false, raf: 0 };
   function animatePageTo(target) {
-    const view = $("view");
-    if (!view) return;
-    if (pageAnim.active) {
-      // 连续点击：不重置起点/时长，只改目标，动画继续走，避免反复启动造成残影
-      pageAnim.to = target;
-      return;
-    }
-    pageAnim.from = view.scrollLeft;
-    pageAnim.to = target;
-    pageAnim.start = performance.now();
-    pageAnim.active = true;
-    const dur = 200;   // 比 130 慢一点，减轻残影/晃眼
-    const tick = (t) => {
-      if (!pageAnim.active) return;
-      const p = Math.min(1, (t - pageAnim.start) / dur);
-      const eased = 1 - Math.pow(1 - p, 3);
-      view.scrollLeft = pageAnim.from + (pageAnim.to - pageAnim.from) * eased;
-      if (p < 1) {
-        pageAnim.raf = requestAnimationFrame(tick);
-      } else {
-        view.scrollLeft = pageAnim.to;
-        pageAnim.active = false;
+    pageAnim.target = target;
+    if (pageAnim.running) return;   // 动画已经在跑：只更新目标，速度和方向自然过渡，不会一跳一跳
+    pageAnim.running = true;
+    const tick = () => {
+      const view = $("view");
+      if (!view) { pageAnim.running = false; return; }
+      const diff = pageAnim.target - view.scrollLeft;
+      if (Math.abs(diff) < 0.6) {
+        view.scrollLeft = pageAnim.target;
+        pageAnim.running = false;
         pageAnim.raf = 0;
+        return;
       }
+      // 指数缓动：每帧走剩余距离的 24%，连续点击时速度平滑变化
+      view.scrollLeft += diff * 0.24;
+      pageAnim.raf = requestAnimationFrame(tick);
     };
     pageAnim.raf = requestAnimationFrame(tick);
   }
@@ -406,9 +398,15 @@
     const next = Math.max(0, Math.min(n, state.pageCount - 1));
     state.page = next;
     const targetLeft = state.page * (state.pageW + PAGE_GAP);
-    if (animate && prev !== next) animatePageTo(targetLeft);
-    else { view.scrollLeft = targetLeft; pageAnim.active = false; }
-    setTimeout(() => lockPageScroll(state.page, 1400), 200);
+    if (animate && prev !== next) {
+      animatePageTo(targetLeft);
+    } else {
+      if (pageAnim.raf) cancelAnimationFrame(pageAnim.raf);
+      pageAnim.running = false;
+      pageAnim.raf = 0;
+      pageAnim.target = targetLeft;
+      view.scrollLeft = targetLeft;
+    }
     const ch = state.chapters[state.current];
     $("position").textContent = `第 ${state.page + 1} / ${state.pageCount} 页 · 第 ${state.current + 1} / ${state.chapters.length} 章`;
     if (ch) setStatus("正在阅读：" + ch.title + "（左键下一页 / 右键上一页）");
