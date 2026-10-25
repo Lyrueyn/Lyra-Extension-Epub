@@ -76,13 +76,7 @@
   .swatches { display:flex; flex-wrap:wrap; gap:6px; }
   .swatches button { padding:6px 8px; border-radius:8px; font-size:11px; }
   #themeBtn { min-width:44px; }
-  @keyframes epubTurn {
-    0%   { opacity:1; transform:translateX(0); }
-    45%  { opacity:.15; transform:translateX(calc(var(--turn-dir, 1) * 24px)); }
-    100% { opacity:1; transform:none; }
-  }
-  #view.turn-anim { animation:epubTurn 210ms ease; }
-  #view { will-change:opacity, transform; }
+  #view { will-change:scroll-position; }
   #empty { display:flex; align-items:center; justify-content:center; height:100%; flex-direction:column; gap:12px; color:var(--sub); }
   #empty .icon { font-size:48px; }
   #status { height:24px; background:var(--panel); border-top:1px solid var(--line);
@@ -294,18 +288,31 @@
     } catch (e) { setStatus("分页失败：" + (e.message || e)); }
   }
 
+  let pageAnimToken = 0;
   function showPage(n, animate = true) {
     const view = $("view");
     if (!view) return;
     const prev = state.page;
     const next = Math.max(0, Math.min(n, state.pageCount - 1));
     state.page = next;
-    view.scrollLeft = state.page * (state.pageW + PAGE_GAP);
+    const targetLeft = state.page * (state.pageW + PAGE_GAP);
     if (animate && prev !== next) {
-      view.style.setProperty("--turn-dir", next > prev ? "1" : "-1");
-      view.classList.remove("turn-anim");
-      void view.offsetWidth;
-      view.classList.add("turn-anim");
+      // ★ 平滑横向翻页：像把纸往左/右推过去，而不是闪一下/抖一下
+      const token = ++pageAnimToken;
+      const from = view.scrollLeft;
+      const t0 = performance.now();
+      const dur = Math.min(320, 160 + Math.abs(targetLeft - from) / 4);
+      const step = (t) => {
+        if (token !== pageAnimToken) return;          // 连续点击：旧动画作废
+        const p = Math.min(1, (t - t0) / dur);
+        const eased = 1 - Math.pow(1 - p, 3);        // easeOutCubic
+        view.scrollLeft = from + (targetLeft - from) * eased;
+        if (p < 1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    } else {
+      pageAnimToken++;
+      view.scrollLeft = targetLeft;
     }
     const ch = state.chapters[state.current];
     $("position").textContent = `第 ${state.page + 1} / ${state.pageCount} 页 · 第 ${state.current + 1} / ${state.chapters.length} 章`;
@@ -324,11 +331,6 @@
       showPage(state.pageCount - 1);
     }
   }
-
-  (() => {
-    const v = $("view");
-    if (v) v.addEventListener("animationend", () => v.classList.remove("turn-anim"));
-  })();
 
   function renderChapterList() {
     const box = $("chapters");
