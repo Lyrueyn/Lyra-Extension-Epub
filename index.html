@@ -26,8 +26,10 @@
   .chapter { display:block; width:100%; text-align:left; padding:8px 9px; border-radius:6px;
     color:var(--text); font-size:13px; line-height:1.45; background:transparent; }
   .chapter.active { background:#2a2d33; color:#fff; }
-  #main { flex:1; overflow:hidden; background:var(--reader-bg); display:flex; align-items:center;
+  #main { flex:1; overflow:hidden; background:#080808; display:flex; align-items:center;
     justify-content:center; padding:24px 40px; }
+  #pageFrame { position:relative; background:var(--reader-bg); border:1px solid #3A3A3A;
+    border-radius:10px; box-shadow:0 14px 44px rgba(0,0,0,.65); padding:0 32px; }
   #view { max-width:none; margin:0; padding:0; font-size:22px; line-height:1.95;
     background:var(--reader-bg); color:var(--reader-fg);
     column-fill:auto; overflow:hidden; }
@@ -82,11 +84,7 @@
     to   { opacity:1; transform:none; }
   }
   #view.chapter-in { animation:chapterIn 220ms ease; }
-  @keyframes pageFadeIn {
-    from { opacity:.25; }
-    to   { opacity:1; }
-  }
-  #view.page-in { animation:pageFadeIn 170ms ease; }
+  #view { will-change:scroll-position; }
   #empty { display:flex; align-items:center; justify-content:center; height:100%; flex-direction:column; gap:12px; color:var(--sub); }
   #empty .icon { font-size:48px; }
   #status { height:24px; background:var(--panel); border-top:1px solid var(--line);
@@ -113,7 +111,7 @@
     <div id="main">
       <div id="empty"><div class="icon">📖</div><div>打开一本 EPUB，开始阅读</div>
         <button id="emptyOpen" class="primary">选择 EPUB 文件</button></div>
-      <div id="view" style="display:none"></div>
+      <div id="pageFrame" style="display:none"><div id="view"></div></div>
     </div>
     <aside id="theme">
       <div class="inner">
@@ -236,6 +234,7 @@
     renderChapterList();
     $("bookTitle").textContent = state.title;
     $("empty").style.display = "none";
+    $("pageFrame").style.display = "block";
     $("view").style.display = "block";
     const saved = parseInt(localStorage.getItem("lyra_epub_idx_" + state.bookKey) || "0", 10) || 0;
     await loadChapter(Math.max(0, Math.min(saved, state.chapters.length - 1)));
@@ -285,6 +284,11 @@
       view.style.width = w + "px";
       view.style.height = h + "px";
       view.style.columnWidth = w + "px";
+      const frame = $("pageFrame");
+      if (frame) {
+        frame.style.width = (w + 64) + "px";
+        frame.style.height = h + "px";
+      }
       view.style.columnGap = PAGE_GAP + "px";
       view.style.columnFill = "auto";
       view.style.overflow = "hidden";
@@ -298,18 +302,31 @@
     } catch (e) { setStatus("分页失败：" + (e.message || e)); }
   }
 
+  let pageAnimToken = 0;
   function showPage(n, animate = true) {
     const view = $("view");
     if (!view) return;
     const prev = state.page;
     const next = Math.max(0, Math.min(n, state.pageCount - 1));
     state.page = next;
-    view.scrollLeft = state.page * (state.pageW + PAGE_GAP);
+    const targetLeft = state.page * (state.pageW + PAGE_GAP);
     if (animate && prev !== next) {
-      // ★ 在文字栏内部柔和淡入；不横向拖动整栏，避免“中间一段滑走”的怪异感
-      view.classList.remove("page-in");
-      void view.offsetWidth;
-      view.classList.add("page-in");
+      // ★ 在“书页边框”内部平滑横向平移，外部区域已压暗，不会再像中间一段凭空滑动
+      const token = ++pageAnimToken;
+      const from = view.scrollLeft;
+      const t0 = performance.now();
+      const dur = Math.min(300, 170 + Math.abs(targetLeft - from) / 5);
+      const step = (t) => {
+        if (token !== pageAnimToken) return;
+        const p = Math.min(1, (t - t0) / dur);
+        const eased = 1 - Math.pow(1 - p, 3);
+        view.scrollLeft = from + (targetLeft - from) * eased;
+        if (p < 1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    } else {
+      pageAnimToken++;
+      view.scrollLeft = targetLeft;
     }
     const ch = state.chapters[state.current];
     $("position").textContent = `第 ${state.page + 1} / ${state.pageCount} 页 · 第 ${state.current + 1} / ${state.chapters.length} 章`;
