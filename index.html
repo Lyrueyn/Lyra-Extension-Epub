@@ -343,6 +343,24 @@
     } catch (e) { setStatus("分页失败：" + (e.message || e)); }
   }
 
+  let pageLockToken = 0;
+  function lockPageScroll(expectedPage, duration = 1200) {
+    const view = $("view");
+    if (!view) return;
+    const token = ++pageLockToken;
+    const target = expectedPage * (state.pageW + PAGE_GAP);
+    const until = performance.now() + duration;
+    const tick = () => {
+      if (token !== pageLockToken) return;
+      if (state.page !== expectedPage || !state.ready) return;
+      try {
+        if (Math.abs(view.scrollLeft - target) > 1) view.scrollLeft = target;
+      } catch { }
+      if (performance.now() < until) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+
   let pageAnimToken = 0;
   function showPage(n, animate = true) {
     const view = $("view");
@@ -367,6 +385,12 @@
     } else {
       pageAnimToken++;
       view.scrollLeft = targetLeft;
+    }
+    // ★ 刚翻页后一段时间内持续钉住当前页，避免图片/字体/尺寸异步重排把 scrollLeft 归零
+    if (animate && prev !== next) {
+      setTimeout(() => lockPageScroll(state.page, 1400), 320);
+    } else {
+      lockPageScroll(state.page, 1400);
     }
     const ch = state.chapters[state.current];
     $("position").textContent = `第 ${state.page + 1} / ${state.pageCount} 页 · 第 ${state.current + 1} / ${state.chapters.length} 章`;
