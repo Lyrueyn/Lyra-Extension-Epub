@@ -1,7 +1,7 @@
 ﻿{
   "id": "epub",
   "name": "EPUB 阅读器",
-  "version": "0.5.16",
+  "version": "0.5.17",
   "entry": "index.html",
   "description": "在璃鸢镜中阅读 EPUB：目录、章节、字号、阅读进度记忆。",
   "fileTypes": [".epub"],

@@ -268,6 +268,7 @@
       try { layoutPages(false); } catch { }
       state.ready = true;
       state.opening = false;
+      try { if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage("lyra-book-ready"); } catch { }
       const pending = state.pendingTurn;
       state.pendingTurn = null;
       if (pending === "next") nextPage();
