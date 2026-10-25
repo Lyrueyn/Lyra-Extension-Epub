@@ -20,12 +20,12 @@
   button.primary { background:var(--pink); color:#fff; }
   button:hover { filter:brightness(1.15); }
   #body { flex:1; display:flex; min-height:0; }
-  #side { width:250px; flex:none; background:var(--panel); border-right:1px solid var(--line);
-    overflow-y:auto; overflow-x:hidden; padding:10px 8px; }
+  #side { width:270px; flex:none; background:var(--panel); border-right:1px solid var(--line);
+    overflow-y:auto; overflow-x:hidden; padding:10px 10px; scrollbar-gutter:stable; }
   #side h3 { color:var(--sub); font-size:12px; font-weight:500; margin:6px 8px 10px; }
-  .chapter { display:block; width:100%; text-align:left; padding:8px 9px; border-radius:6px;
+  .chapter { display:block; width:100%; text-align:left; padding:8px 10px; border-radius:6px;
     color:var(--text); font-size:13px; line-height:1.45; background:transparent;
-    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    overflow:hidden; overflow-wrap:anywhere; white-space:normal; }
   .chapter.active { background:#2a2d33; color:#fff; }
   #main { flex:1; overflow:hidden; background:#080808; display:flex; align-items:center;
     justify-content:center; padding:24px 40px; }
@@ -368,26 +368,30 @@
   function animatePageTo(target) {
     const view = $("view");
     if (!view) return;
+    if (pageAnim.active) {
+      // 连续点击：不重置起点/时长，只改目标，动画继续走，避免反复启动造成残影
+      pageAnim.to = target;
+      return;
+    }
     pageAnim.from = view.scrollLeft;
     pageAnim.to = target;
     pageAnim.start = performance.now();
-    if (!pageAnim.active) {
-      pageAnim.active = true;
-      const dur = 130;   // 快一点，减少晃眼
-      const tick = (t) => {
-        const p = Math.min(1, (t - pageAnim.start) / dur);
-        const eased = 1 - Math.pow(1 - p, 3);
-        view.scrollLeft = pageAnim.from + (pageAnim.to - pageAnim.from) * eased;
-        if (p < 1) {
-          pageAnim.raf = requestAnimationFrame(tick);
-        } else {
-          view.scrollLeft = pageAnim.to;
-          pageAnim.active = false;
-          pageAnim.raf = 0;
-        }
-      };
-      pageAnim.raf = requestAnimationFrame(tick);
-    }
+    pageAnim.active = true;
+    const dur = 200;   // 比 130 慢一点，减轻残影/晃眼
+    const tick = (t) => {
+      if (!pageAnim.active) return;
+      const p = Math.min(1, (t - pageAnim.start) / dur);
+      const eased = 1 - Math.pow(1 - p, 3);
+      view.scrollLeft = pageAnim.from + (pageAnim.to - pageAnim.from) * eased;
+      if (p < 1) {
+        pageAnim.raf = requestAnimationFrame(tick);
+      } else {
+        view.scrollLeft = pageAnim.to;
+        pageAnim.active = false;
+        pageAnim.raf = 0;
+      }
+    };
+    pageAnim.raf = requestAnimationFrame(tick);
   }
 
   function showPage(n, animate = true) {
