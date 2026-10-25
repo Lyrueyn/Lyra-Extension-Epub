@@ -162,7 +162,7 @@
   const state = {
     zip: null, title: "", opfPath: "", opfDir: "", chapters: [],
     current: -1, bookKey: "", blobUrls: [], fontSize: 22,
-    page: 0, pageCount: 1, pageW: 0, pageH: 0
+    page: 0, pageCount: 1, pageW: 0, pageH: 0, ready: false
   };
 
   function setStatus(t) { $("statusText").textContent = t || ""; }
@@ -207,6 +207,7 @@
   }
 
   async function parseBookData(data, fileName, fileSize) {
+    state.ready = false;
     state.zip = await JSZip.loadAsync(data);
     state.bookKey = fileName + ":" + (fileSize || data.byteLength);
     const container = await readText("META-INF/container.xml");
@@ -352,11 +353,13 @@
   }
 
   async function nextPage() {
+    if (!state.ready) return;
     if (state.page < state.pageCount - 1) { showPage(state.page + 1); return; }
     if (state.current < state.chapters.length - 1) await loadChapter(state.current + 1);
   }
 
   async function prevPage() {
+    if (!state.ready) return;
     if (state.page > 0) { showPage(state.page - 1); return; }
     if (state.current > 0) {
       await loadChapter(state.current - 1, "last");   // 上一章最后一页，而不是开头
@@ -389,6 +392,7 @@
 
   async function loadChapter(idx, targetPage = null) {
     if (!state.zip || idx < 0 || idx >= state.chapters.length) return;
+    state.ready = false;
     const prevChapter = state.current;
     const chapterView = $("view");
     const dir = idx >= prevChapter ? 1 : -1;
@@ -463,10 +467,7 @@
       // 先按当前内容分页；图片/样式加载完再保留当前页重排
       layoutPages(true);
       if (targetPage === "last") showPage(state.pageCount - 1, false);
-      setTimeout(() => {
-        layoutPages(false);
-        if (targetPage === "last") showPage(state.pageCount - 1, false);
-      }, 80);
+      state.ready = true;
       if (prevChapter >= 0 && prevChapter !== idx) {
         view.classList.remove("chapter-out-next", "chapter-out-prev");
         view.classList.remove("chapter-next", "chapter-prev");
