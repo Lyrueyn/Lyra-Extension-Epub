@@ -475,7 +475,10 @@
         view.classList.add(dir > 0 ? "chapter-next" : "chapter-prev");
       }
     } catch (e) {
+      state.ready = true;
       setStatus("章节载入失败：" + (e.message || e));
+    } finally {
+      state.ready = true;
     }
   }
 
@@ -589,9 +592,7 @@
     if (!area) return;
     area.addEventListener("click", ev => {
       if (ev.button !== 0) return;
-      if (ev.target && ev.target.closest && ev.target.closest("a")) return;   // 点链接仍然跳链接
-      const sel = window.getSelection ? window.getSelection() : null;
-      if (sel && String(sel).trim().length > 0) return;                      // 选字时不翻页
+      // ★ 点击正文任意位置都翻下一页；不再因为点在链接上或残留选区而失效
       nextPage();
     });
     area.addEventListener("contextmenu", ev => {
