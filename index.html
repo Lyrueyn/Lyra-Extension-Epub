@@ -262,7 +262,7 @@
     state.opening = true;
     state.pendingTurn = null;
     state.ready = false;
-    state.clickBlockedUntil = performance.now() + 2400;   // 打开后 2.4 秒内点正文不翻页
+    state.clickBlockedUntil = performance.now() + 700;    // 打开阶段短暂防误触
     await loadChapter(Math.max(0, Math.min(saved, state.chapters.length - 1)));
     // ★ 打开后 1.5 秒内布局/窗口/字体还在稳定；此时点击不翻页，也不排队补翻
     state.ready = false;
@@ -270,9 +270,9 @@
       try { layoutPages(false); } catch { }
       state.ready = true;
       state.opening = false;
-      state.clickBlockedUntil = performance.now() + 600;
+      state.clickBlockedUntil = performance.now() + 200;
       try { if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage("lyra-book-ready"); } catch { }
-    }, 1500);
+    }, 300);
   }
 
   async function parseNav(navPath) {
