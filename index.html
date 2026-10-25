@@ -210,7 +210,7 @@
   }
 
   async function parseBookData(data, fileName, fileSize) {
-    if (state.bookLoaded && fileName === "book.epub") return;   // 宿主可能重复投喂，同一本书只解析一次
+    if (state.bookLoaded) return;   // ★ 已经加载过就忽略（宿主的重复投喂文件名是真实文件名，不是 book.epub）
     state.bookLoaded = true;   // ★ 开始解析就加锁：大书解析超过 1.2 秒时也不会被第二份打断
     state.ready = false;
     state.zip = await JSZip.loadAsync(data);
