@@ -165,7 +165,7 @@
     zip: null, title: "", opfPath: "", opfDir: "", chapters: [],
     current: -1, bookKey: "", blobUrls: [], fontSize: 22,
     page: 0, pageCount: 1, pageW: 0, pageH: 0, ready: false,
-    opening: false, pendingTurn: null
+    opening: false, pendingTurn: null, clickBlockedUntil: 0
   };
 
   function setStatus(t) { $("statusText").textContent = t || ""; }
@@ -261,19 +261,18 @@
     const saved = parseInt(localStorage.getItem("lyra_epub_idx_" + state.bookKey) || "0", 10) || 0;
     state.opening = true;
     state.pendingTurn = null;
+    state.ready = false;
+    state.clickBlockedUntil = performance.now() + 2400;   // 打开后 2.4 秒内点正文不翻页
     await loadChapter(Math.max(0, Math.min(saved, state.chapters.length - 1)));
-    // ★ 刚打开时留 300ms 让窗口尺寸/字体/图片稳定；这期间点击排队，不会翻页后又被重排闪回
+    // ★ 打开后 1.5 秒内布局/窗口/字体还在稳定；此时点击不翻页，也不排队补翻
     state.ready = false;
     setTimeout(() => {
       try { layoutPages(false); } catch { }
       state.ready = true;
       state.opening = false;
+      state.clickBlockedUntil = performance.now() + 600;
       try { if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage("lyra-book-ready"); } catch { }
-      const pending = state.pendingTurn;
-      state.pendingTurn = null;
-      if (pending === "next") nextPage();
-      else if (pending === "prev") prevPage();
-    }, 300);
+    }, 1500);
   }
 
   async function parseNav(navPath) {
@@ -399,13 +398,13 @@
   }
 
   async function nextPage() {
-    if (!state.ready) { if (state.opening) state.pendingTurn = "next"; return; }
+    if (!state.ready) return;
     if (state.page < state.pageCount - 1) { showPage(state.page + 1); return; }
     if (state.current < state.chapters.length - 1) await loadChapter(state.current + 1);
   }
 
   async function prevPage() {
-    if (!state.ready) { if (state.opening) state.pendingTurn = "prev"; return; }
+    if (!state.ready) return;
     if (state.page > 0) { showPage(state.page - 1); return; }
     if (state.current > 0) {
       await loadChapter(state.current - 1, "last");   // 上一章最后一页，而不是开头
@@ -513,7 +512,7 @@
       // 先按当前内容分页；图片/样式加载完再保留当前页重排
       layoutPages(true);
       if (targetPage === "last") showPage(state.pageCount - 1, false);
-      state.ready = true;
+      if (!state.opening) state.ready = true;
       if (prevChapter >= 0 && prevChapter !== idx) {
         const layer = $("chapterLayer");
         if (layer) {
@@ -640,7 +639,8 @@
     if (!area) return;
     area.addEventListener("click", ev => {
       if (ev.button !== 0) return;
-      if (ev.target && ev.target.closest && ev.target.closest("a")) return;   // 链接交给链接自身处理，避免双重跳转
+      if (performance.now() < state.clickBlockedUntil) return;   // ★ 打开后的加载保护期，点了也不翻
+      if (ev.target && ev.target.closest && ev.target.closest("a")) return;
       nextPage();
     });
     area.addEventListener("contextmenu", ev => {
