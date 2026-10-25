@@ -211,6 +211,7 @@
 
   async function parseBookData(data, fileName, fileSize) {
     if (state.bookLoaded && fileName === "book.epub") return;   // 宿主可能重复投喂，同一本书只解析一次
+    state.bookLoaded = true;   // ★ 开始解析就加锁：大书解析超过 1.2 秒时也不会被第二份打断
     state.ready = false;
     state.zip = await JSZip.loadAsync(data);
     state.bookKey = fileName + ":" + (fileSize || data.byteLength);
@@ -274,7 +275,6 @@
       state.clickBlockedUntil = 0;
       try { if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage("lyra-book-ready"); } catch { }
     }, 300);
-    state.bookLoaded = true;
   }
 
   async function parseNav(navPath) {
@@ -602,6 +602,7 @@
   $("file").addEventListener("change", async ev => {
     const file = ev.target.files && ev.target.files[0];
     if (!file) return;
+    state.bookLoaded = false;   // 用户主动换书，允许重新解析
     try { setStatus("正在解析 EPUB…"); await parseBook(file); }
     catch (e) { setStatus("解析失败：" + (e.message || e)); alert("EPUB 解析失败：" + (e.message || e)); }
     ev.target.value = "";
