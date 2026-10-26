@@ -1,0 +1,5 @@
+﻿test-fixtures/
+tests/artifacts/
+*.epub
+sample.pdf
+index_test.html
