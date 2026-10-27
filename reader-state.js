@@ -9,12 +9,12 @@
   "use strict";
 
   const PROTOCOL = "lyra-reader";
-  const VERSION = 2;
+  const VERSION = 3;
   const REQUEST_TIMEOUT = 3000;
   const HELLO_TIMEOUT = 1200;
   const BOOKMARK_LIMIT = 500;
   const BOOKMARK_PAGE_MAX = 50;
-  const REQUIRED_CAPABILITIES = ["persistentState", "preferenceGrants", "positionOperations", "finalizeAck"];
+  const REQUIRED_CAPABILITIES = ["persistentState", "preferenceGrants", "positionOperations", "finalizeAck", "fieldResults", "positionSubmitRevision", "frozenFinalize"];
 
   function validateBookmark(bookmark) {
     if (!bookmark || typeof bookmark !== "object") throw new ReaderStateError("BAD_BOOKMARK", "书签必须是对象");
@@ -55,6 +55,7 @@
       this._lastSequence = 0;
       this._hostEpoch = { activationEpoch: 0, navEpoch: 0 };
       this.lastRevision = 0;
+      this.lastPositionRevision = 0;
       this._bookCorrupt = new Map();   // bookId -> { position, bookmarks }
       this._prefsCorrupt = false;      // 偏好是全局作用域
       this._bookId = "";
@@ -126,7 +127,7 @@
         };
         const timer = setTimeout(() => {
           this.supported = false;
-          this._degradeHost("当前主程序不支持 R4 阅读器协议，阅读位置和设置只保存在当前窗口");
+          this._degradeHost("当前主程序不支持 R5 阅读器协议，阅读位置和设置只保存在当前窗口");
           finish(false);
         }, HELLO_TIMEOUT);
         const secondTimer = setTimeout(() => { this.supported = false; finish(false); }, HELLO_TIMEOUT + 150);
@@ -142,7 +143,7 @@
               navEpoch: Number(result.navEpoch) || 0,
             };
             this.supported = protocolOk && capabilityOk && !!caps.persistentState;
-            if (!this.supported) this._degradeHost("当前主程序没有 R4 持久化能力，阅读位置和设置只保存在当前窗口");
+            if (!this.supported) this._degradeHost("当前主程序没有 R5 持久化能力，阅读位置和设置只保存在当前窗口");
             finish(this.supported);
           },
           reject: () => {
@@ -238,7 +239,10 @@
         try {
           const res = await this.request("state.load", { bookId });
           return {
-            mode: "host", revision: res.revision || 0, position: res.position || null,
+            mode: "host", revision: res.revision || 0,
+            positionRevision: res.positionRevision != null ? (Number(res.positionRevision) || 0) : (Number(res.revision) || 0),
+            metadataRevision: res.metadataRevision != null ? (Number(res.metadataRevision) || 0) : 0,
+            position: res.position || null,
             preferences: res.preferences || null,
             bookmarksRevision: res.bookmarksRevision || res.revision || 0,
             bookmarkCount: res.bookmarkCount || 0, interactionToken: res.interactionToken || 0,
@@ -255,13 +259,23 @@
       catch (e) { corruption.position = true; warnings.push(e.message || "本地位置损坏，已按空位置打开并保留原数据"); }
       let bookmarkState = { revision: 0, items: [] };
       try { bookmarkState = this._localBookmarkState(bookId); }
-      catch (e) { corruption.bookmarks = true; warnings.push(e.message || "本地书签损坏，已按空书签打开并保留原数据"); }
+      catch (e) {
+        corruption.bookmarks = true;
+        warnings.push(e.message || "本地书签暂不可读或已损坏，已按空书签打开并保留原数据");
+      }
       if (corruption.position || corruption.bookmarks) this._bookCorrupt.set(bookId, corruption);
       else this._bookCorrupt.delete(bookId);
+      if (!corruption.bookmarks) {
+        const current = this._bookCorruption(bookId);
+        current.bookmarks = false;
+      }
       const prefs = this._localLoadPrefs();
       if (this._prefsCorrupt) warnings.push("本地设置损坏，已按默认设置打开并保留原数据");
       return {
-        mode: "local", revision: Number(data.revision) || 0, position: data.position || null,
+        mode: "local", revision: Number(data.revision) || 0,
+        positionRevision: data.positionRevision != null ? (Number(data.positionRevision) || 0) : (Number(data.revision) || 0),
+        metadataRevision: data.metadataRevision != null ? (Number(data.metadataRevision) || 0) : 0,
+        position: data.position || null,
         positionSequence: Number(data.positionSequence) || 0,
         preferences: prefs, bookmarksRevision: bookmarkState.revision,
         bookmarkCount: bookmarkState.items.length, interactionToken: 0, warnings,
@@ -276,6 +290,7 @@
           operationId: operationId || "",
         });
         this.lastRevision = Number(res.revision) || this.lastRevision;
+        this.lastPositionRevision = Number(res.positionRevision) || this.lastRevision;
         return res;
       }
       this._assertLocalPositionWritable(bookId);
@@ -285,20 +300,23 @@
       if (seq === prevSeq) {
         let same = false;
         try { same = JSON.stringify(data.position) === JSON.stringify(position); } catch { same = false; }
-        if (same) return { revision: Number(data.revision) || 0, positionSequence: prevSeq, idempotent: true, mode: "local" };
+        if (same) return { revision: Number(data.revision) || 0, positionRevision: Number(data.positionRevision) || Number(data.revision) || 0, positionSequence: prevSeq, idempotent: true, mode: "local" };
         throw new ReaderStateError("DUPLICATE_SEQUENCE", "同一位置操作序号对应不同位置，拒绝覆盖");
       }
       data.position = position;
       data.positionSequence = seq;
       data.positionOperationId = operationId || "";
       data.revision = (Number(data.revision) || 0) + 1;
+      data.positionRevision = (Number(data.positionRevision) || 0) + 1;
       data.updatedAt = new Date().toISOString();
       this._localSave(bookId, data);
       this.lastRevision = data.revision;
-      return { revision: data.revision, positionSequence: seq, mode: "local" };
+      this.lastPositionRevision = data.positionRevision;
+      return { revision: data.revision, positionRevision: data.positionRevision, positionSequence: seq, mode: "local" };
     }
 
     async savePreferences(patch, grants = {}, scope = "global") {
+      if (scope !== "global") throw new ReaderStateError("UNSUPPORTED_SCOPE", "只支持全局偏好作用域");
       if (this.isPersistent) {
         let res = null;
         for (let attempt = 0; attempt < 2; attempt++) {
@@ -426,22 +444,24 @@
         applied.push(k);
         changed = true;
       }
-      if (rejected.length) throw new ReaderStateError("PREFERENCE_STALE", "本地偏好字段版本已过期或冲突");
       if (changed) {
         try { localStorage.setItem("lyra_epub_prefs", JSON.stringify({ preferences, fieldSequences: seqs })); }
         catch (e) { throw new ReaderStateError("LOCAL_WRITE_FAILED", "本地保存设置失败：" + (e.message || e)); }
       }
-      return { mode: "local", revision: Number(existing.revision) || 0, applied, rejected: [] };
+      return { mode: "local", revision: Number(existing.revision) || 0, applied, idempotent: [], superseded: rejected };
     }
     _localBookmarkState(bookId) {
-      this._assertLocalBookmarkWritable(bookId);
+      // 先读取当前原件：旧的损坏/拒读标记不能阻止恢复后重新校验。
       let raw = null;
       try { raw = localStorage.getItem(this._lsBookmarksKey(bookId)); }
       catch { throw new ReaderStateError("LOCAL_UNAVAILABLE", "当前窗口本地存储不可用"); }
       if (!raw) return { revision: 0, items: [] };
       let parsed;
       try { parsed = JSON.parse(raw); }
-      catch { throw new ReaderStateError("LOCAL_CORRUPT", "当前窗口本地书签损坏，未覆盖原数据"); }
+      catch {
+        this._bookCorruption(bookId).bookmarks = true;
+        throw new ReaderStateError("LOCAL_CORRUPT", "当前窗口本地书签损坏，未覆盖原数据");
+      }
       if (Array.isArray(parsed)) return { revision: 0, items: parsed };
       return { revision: Number(parsed && parsed.revision) || 0, items: Array.isArray(parsed && parsed.items) ? parsed.items : [] };
     }

@@ -135,33 +135,48 @@
       text += data;
       segments.push({ node, start, end: text.length });
     };
-    const isHiddenElement = (node) => {
+    const styleOf = (node) => ((node.getAttribute && node.getAttribute("style")) || "");
+    const styleDisplayNone = (node) => /(?:^|;)\s*display\s*:\s*none(?:\s*!important)?(?:\s*;|$)/i.test(styleOf(node));
+    const localVisibility = (node) => {
+      const style = styleOf(node);
+      const m = /(?:^|;)\s*visibility\s*:\s*(hidden|visible|collapse)(?:\s*!important)?(?:\s*;|$)/i.exec(style);
+      if (m) return m[1].toLowerCase();
+      const attr = (node.getAttribute && node.getAttribute("visibility")) || "";
+      if (/^(hidden|visible|collapse)$/i.test(attr)) return attr.toLowerCase();
+      return null;
+    };
+    const displayNone = (node) => {
       if (!node || node.nodeType !== 1) return false;
       if (node.hasAttribute && node.hasAttribute("hidden")) return true;
-      const style = (node.getAttribute && node.getAttribute("style")) || "";
-      if (/display\s*:\s*none/i.test(style) || /visibility\s*:\s*hidden/i.test(style)) return true;
-      // SVG presentation attributes；display/visibility 可继承到子树
+      if (styleDisplayNone(node)) return true;
       const display = (node.getAttribute && node.getAttribute("display")) || "";
-      const visibility = (node.getAttribute && node.getAttribute("visibility")) || "";
-      if (/^none$/i.test(display) || /^hidden$/i.test(visibility)) return true;
-      return false;
+      return /^none$/i.test(display);
     };
-    const walk = (node, isRoot = false, hiddenContext = false) => {
+    const walk = (node, isRoot = false, visibilityHidden = false) => {
       if (!node) return;
-      if (node.nodeType === 3) { if (!hiddenContext) add(node, node.data); return; }
+      if (node.nodeType === 3) { if (!visibilityHidden) add(node, node.data); return; }
       if (node.nodeType !== 1) return;
       const tag = (node.localName || "").toLowerCase();
-      // 可见性先于 br/块分隔判断：<br hidden> 不能制造换行
-      if (!isRoot && (hiddenContext || isHiddenElement(node))) return;
-      if (tag === "br") { text += "\n"; return; }
+      if (!isRoot && displayNone(node)) return;   // display:none 不可由子节点恢复
       if (!isRoot) {
-        // 视觉可见正文：aria-hidden 仅影响可访问树，不据此排除屏幕文字；
-        // symbol 作为模板内容默认不直接绘制，defs/desc/title 不是正文。
-        if (tag === "defs" || tag === "desc" || tag === "title" || tag === "symbol") return;
+        const vis = localVisibility(node);
+        if (vis === "hidden" || vis === "collapse") visibilityHidden = true;
+        else if (vis === "visible") visibilityHidden = false;
       }
+      if (tag === "br") {
+        // 隐藏 <br> 不制造换行；父 visibility:hidden 下的 <br> 也不产生可见换行
+        if (!visibilityHidden) text += "\n";
+        return;
+      }
+      if (!isRoot && (tag === "defs" || tag === "desc" || tag === "title" || tag === "symbol" || tag === "use")) return;
       if (tag === "details" && !node.hasAttribute("open")) {
         const summary = Array.from(node.children || []).find((c) => (c.localName || "").toLowerCase() === "summary");
-        if (summary) walk(summary, false, false);
+        if (summary) walk(summary, false, visibilityHidden);
+        return;
+      }
+      if (visibilityHidden) {
+        // visibility 可被子节点显式 visible 覆盖：继续下钻，但不加入本节点的分隔/文本。
+        for (const child of Array.from(node.childNodes || [])) walk(child, false, true);
         return;
       }
       const block = !isRoot && TEXT_BLOCK_TAGS.has(tag);
@@ -583,9 +598,14 @@
       const paths = this._taskResources.get(taskId);
       this._taskResources.delete(taskId);
       if (!paths) return;
-      const keep = this._taskResources.get(this._currentTaskId);
+      // 准备任务不等于已显示任务：任何其它仍存活任务/回滚引用的资源都必须保留。
+      const keep = new Set();
+      for (const [otherId, otherPaths] of this._taskResources) {
+        if (otherId === taskId) continue;
+        for (const p of otherPaths) keep.add(p);
+      }
       for (const path of paths) {
-        if (keep && keep.has(path)) continue;
+        if (keep.has(path)) continue;
         const rec = this._resources.get(path);
         if (rec) { try { URL.revokeObjectURL(rec.url); } catch { } this._resources.delete(path); }
       }
@@ -596,7 +616,8 @@
       const pending = this._resourcePending.get(path);
       if (pending) {
         const url = await pending.promise;
-        if (url) return url;
+        if (url) { this._rememberTaskResource(taskId, path); return url; }
+        // 旧任务的 pending 结果不能给新任务使用；当前任务必须重新读取。
         if (taskId && taskId === this._currentTaskId) return this._resourceBaseUrl(path, taskId);
         return "";
       }
@@ -653,7 +674,20 @@
           // 先删除书内自行伪造的内部控制属性，再由清洗逻辑重新建立可信数据
           if (name.startsWith("data-lyra-")) el.removeAttribute(attr.name);
           else if (name.startsWith("on")) el.removeAttribute(attr.name);
-          else if (name === "style" || name === "srcdoc" || name === "formaction" || name === "action" || name === "target") el.removeAttribute(attr.name);
+          else if (name === "style") {
+            // 可见性必须与文字模型共用：只保留 display:none / visibility，不保留可注入布局的其它声明。
+            const safe = [];
+            for (const rawDecl of String(attr.value || "").split(";")) {
+              const m = /^\s*([a-zA-Z-]+)\s*:\s*([^!;]+?)\s*(?:!important\s*)?$/i.exec(rawDecl);
+              if (!m) continue;
+              const prop = m[1].toLowerCase(), val = m[2].trim().toLowerCase();
+              if (prop === "display" && val === "none") safe.push("display:none");
+              else if (prop === "visibility" && /^(hidden|visible|collapse)$/.test(val)) safe.push("visibility:" + val);
+            }
+            if (safe.length) el.setAttribute("style", safe.join(";"));
+            else el.removeAttribute("style");
+          }
+          else if (name === "srcdoc" || name === "formaction" || name === "action" || name === "target") el.removeAttribute(attr.name);
           else if (name === "srcset" || name === "imagesrcset" || name === "xlink:href") {
             // xlink:href 只给 SVG a 单独处理，普通元素一律移除
             if (!(name === "xlink:href" && (el.localName === "a" || el.localName === "image"))) el.removeAttribute(attr.name);

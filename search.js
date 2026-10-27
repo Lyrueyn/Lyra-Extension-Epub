@@ -89,52 +89,84 @@
     async search(query) {
       const q = String(query || "").trim();
       if (!q) return { query: q, results: [], total: 0, truncated: false, chars: 0, scannedSections: 0, totalSections: 0 };
-      const re = queryPattern(q);
-      if (!re) return { query: q, results: [], total: 0, truncated: false, chars: 0, scannedSections: 0, totalSections: 0 };
-      const gen = this._generation;   // 在 await 之前捕获查询身份
+      // 明确输入限制；超长 query 不再交给正则引擎，也不假装扫描过。
+      if (q.length > 4096) return {
+        query: q, results: [], total: 0, truncated: true, error: "QUERY_TOO_LONG",
+        chars: 0, scannedSections: 0, totalSections: 0,
+      };
+      const parts = q.split(/\s+/).filter(Boolean);
+      if (!parts.length) return { query: q, results: [], total: 0, truncated: false, chars: 0, scannedSections: 0, totalSections: 0 };
+      // 保留 ECMAScript 的 /i 语义（不能先 toLowerCase 再取偏移：İ 等字符会改变 UTF-16 长度）。
+      const firstRe = new RegExp(escapeRegExp(parts[0]), "gi");
+      const partRes = parts.map((p) => new RegExp("^" + escapeRegExp(p), "i"));
+      const gen = this._generation;
       const sections = await this.ensureIndex();
       if (gen !== this._generation) throw new Error("搜索已取消");
       const results = [];
       let total = 0, scanned = 0, errors = 0;
-      const overlap = Math.min(8192, Math.max(256, q.length * 4 + 256));
+      const isWs = (ch) => /\s/.test(ch);
+
       for (const sec of sections) {
         if (gen !== this._generation) throw new Error("搜索已取消");
         const text = await this._textForSection(sec);
         if (gen !== this._generation) throw new Error("搜索已取消");
         scanned++;
         if (text == null) { errors++; continue; }
-        // 按字符块扫描并让出，不以命中次数作为唯一让出条件：零命中和稀疏命中同样可取消。
-        let chunkStart = 0;
-        while (chunkStart < text.length) {
+        let scanStart = 0;
+
+        // 只把“首词起点”按窗口枚举；每个候选在全文上继续到末词。
+        // 因此跨块匹配不会被截断，也不会因窗口重叠重复计数。
+        while (scanStart < text.length) {
           if (gen !== this._generation) throw new Error("搜索已取消");
-          const chunkEnd = Math.min(text.length, chunkStart + SCAN_CHUNK + overlap);
-          const chunk = text.slice(chunkStart, chunkEnd);
-          re.lastIndex = 0;
-          let m;
-          while ((m = re.exec(chunk)) !== null) {
-            const start = chunkStart + m.index;
-            const end = start + m[0].length;
-            total++;
-            if (results.length < MAX_RESULTS) {
-              results.push({
-                id: "r-" + sec.index + "-" + start,
-                spineIndex: sec.index,
-                title: sec.title,
-                offset: start,
-                length: m[0].length,
-                quote: normalize(text.slice(Math.max(0, start - 24), end + 24)).slice(0, 120),
-                prefix: normalize(text.slice(Math.max(0, start - 32), start)),
-                suffix: normalize(text.slice(end, end + 32)),
-                snippet: normalize(text.slice(Math.max(0, start - 36), end + 48)),
-              });
+          const windowEnd = Math.min(text.length, scanStart + SCAN_CHUNK);
+          let local = 0;
+          let searchFrom = scanStart;
+          while (searchFrom < windowEnd) {
+            if (gen !== this._generation) throw new Error("搜索已取消");
+            firstRe.lastIndex = searchFrom;
+            const firstMatch = firstRe.exec(text);
+            if (!firstMatch || firstMatch.index >= windowEnd) break;
+            const start = firstMatch.index;
+            let p = start + firstMatch[0].length;
+            let ok = true;
+            for (let i = 1; i < parts.length; i++) {
+              let saw = false;
+              while (p < text.length && isWs(text.charAt(p))) { p++; saw = true; }
+              if (!saw) { ok = false; break; }
+              const tail = text.slice(p, p + parts[i].length + 32);
+              const pm = partRes[i].exec(tail);
+              if (!pm || pm.index !== 0) { ok = false; break; }
+              p += pm[0].length;
             }
-            if (m[0].length === 0) re.lastIndex = Math.min(chunk.length, re.lastIndex + 1);
+            if (ok) {
+              total++;
+              if (results.length < MAX_RESULTS) {
+                results.push({
+                  id: "r-" + sec.index + "-" + start,
+                  spineIndex: sec.index,
+                  title: sec.title,
+                  offset: start,
+                  length: p - start,
+                  quote: normalize(text.slice(Math.max(0, start - 24), p + 24)).slice(0, 120),
+                  prefix: normalize(text.slice(Math.max(0, start - 32), start)),
+                  suffix: normalize(text.slice(p, p + 32)),
+                  snippet: normalize(text.slice(Math.max(0, start - 36), p + 48)),
+                });
+              }
+              searchFrom = p;
+              // 密集命中时按命中数让出，零命中时按窗口让出。
+              if ((total & 0xff) === 0) await yieldTask();
+            } else {
+              searchFrom = start + 1;
+            }
+            local++;
+            if (local % 64 === 0) await yieldTask();
+            if (searchFrom >= windowEnd) break;
           }
-          chunkStart = chunkEnd;
+          scanStart = Math.max(windowEnd, searchFrom);
           await yieldTask();
           if (gen !== this._generation) throw new Error("搜索已取消");
         }
-        // 章与章之间再让出一次，保证大量短章节零命中时也能取消
         await yieldTask();
         if (gen !== this._generation) throw new Error("搜索已取消");
       }

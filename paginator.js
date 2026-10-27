@@ -246,9 +246,11 @@
       this.setReduceMotion(options.reduceMotion !== undefined ? options.reduceMotion : this._reduceMotion);
       this._bindContentEvents();
       await this._waitForResources();
-      if (token !== this._sectionToken || this._destroyed) return;
+      if (token !== this._sectionToken || this._destroyed) return false;
+      if (typeof options.isCancelled === "function" && options.isCancelled()) return false;
       this.layout({ resetPage: true });
-      if (token !== this._sectionToken || this._destroyed) return;
+      if (token !== this._sectionToken || this._destroyed) return false;
+      if (typeof options.isCancelled === "function" && options.isCancelled()) return false;
       this.ready = true;
       let target = 0;
       if (options.anchor) target = this.locateAnchor(options.anchor);
@@ -258,6 +260,7 @@
       this.goToPage(target, { animate: false, notify: true });
       this._rememberAnchor();
       this.onContentReady(this.doc);
+      return true;
     }
 
     async _waitForResources() {
@@ -389,16 +392,26 @@
       if (!this.doc || !this.content) return null;
       const model = this.getTextModel();
       const text = model.text;
-      const posOf = (want) => {
+      // 模型 offset 边界可能夹着被隐藏的 DOM 文本：起点取边界后的下一个可见 segment，
+      // 终点取边界前的当前 segment，避免 Range 把 hidden 节点包进高亮。
+      const posOf = (want, preferNext) => {
         want = clamp(Number(want) || 0, 0, text.length);
-        for (const seg of model.segments) {
-          if (want <= seg.end) return { node: seg.node, offset: clamp(want - seg.start, 0, seg.end - seg.start) };
+        for (let i = 0; i < model.segments.length; i++) {
+          const seg = model.segments[i];
+          if (want < seg.end) return { node: seg.node, offset: clamp(want - seg.start, 0, seg.end - seg.start) };
+          if (want === seg.end) {
+            if (preferNext && i + 1 < model.segments.length) {
+              const next = model.segments[i + 1];
+              return { node: next.node, offset: 0 };
+            }
+            return { node: seg.node, offset: seg.end - seg.start };
+          }
         }
         const last = model.segments[model.segments.length - 1];
         return last ? { node: last.node, offset: last.end - last.start } : null;
       };
-      const a = posOf(offset);
-      const b = posOf((Number(offset) || 0) + Math.max(0, Number(length) || 0));
+      const a = posOf(offset, true);
+      const b = posOf((Number(offset) || 0) + Math.max(0, Number(length) || 0), false);
       if (!a || !b) return null;
       const r = this.doc.createRange();
       try {
