@@ -359,7 +359,7 @@
         this.layout({ keepScroll: false });
         if (anchor) {
           const idx = this.locateAnchor(anchor);
-          this.goToPage(idx, { animate: false, notify: true });
+          this.goToPage(idx, { animate: false, notify: true, reason: "layout-restore" });
         }
       });
     }

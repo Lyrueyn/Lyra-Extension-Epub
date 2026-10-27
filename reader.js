@@ -56,9 +56,10 @@
     pendingPrefs: {},
     prefsChangeCounter: 0,
     prefsFlushPromise: null,
-    prefsRetryTimer: 0,
     prefsSaveGeneration: 0,
     saveFailed: false,
+    saveOpVersion: 0,
+    saveFlushPromise: null,
     failedSaves: new Map(),
     saveRetryTimer: 0,
     pageIndex: 0,
@@ -89,6 +90,10 @@
     $("saveStateText").textContent = text ? (text.startsWith("已") ? "✓ " + text : text) : "";
   }
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function nextOperationId(prefix) {
+    try { if (crypto && crypto.randomUUID) return prefix + crypto.randomUUID(); } catch { }
+    return prefix + Date.now().toString(36) + "-" + (++state.prefsChangeCounter).toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+  }
 
   function showLoading(text) {
     $("loadingOverlay").classList.add("show");
@@ -187,13 +192,14 @@
       for (const key of ["fontSize", "lineHeight", "contentWidth", "theme", "bg", "fg", "selectable", "reduceMotion", "sidebar"]) {
         if (JSON.stringify(before[key]) !== JSON.stringify(state.prefs[key])) changed[key] = state.prefs[key];
       }
-      if (Object.keys(changed).length) {
-        const bookId = state.book ? state.book.bookId : "";
-        for (const [field, value] of Object.entries(changed)) {
+      const changedFields = Object.keys(changed);
+      if (changedFields.length) {
+        // 一次 input/change 事件形成不可变偏好操作：立即取得宿主不透明授权，不等待前一笔回执。
+        const operationId = nextOperationId("pref-op-");
+        const grantPromise = Promise.resolve(state.client.grantPreferences(changedFields, operationId)).catch((e) => ({ error: e }));
+        for (const field of changedFields) {
           const changeId = ++state.prefsChangeCounter;
-          // 版本在“用户修改发生时”申请并绑定到本次字段变化，不能等 300ms 后再取
-          const versionPromise = Promise.resolve(state.client.nextPreferenceVersion(bookId)).catch(() => 0);
-          state.pendingPrefs[field] = { value, changeId, versionPromise };
+          state.pendingPrefs[field] = { value: changed[field], changeId, operationId, grantPromise };
         }
       }
     }
@@ -230,64 +236,70 @@
   }
 
   async function flushPrefs() {
-    const fields = Object.keys(state.pendingPrefs || {});
-    if (!fields.length) return true;
-    // 已在途的 flush 串行化，避免两个提交互相覆盖 pending
-    if (state.prefsFlushPromise) return state.prefsFlushPromise;
-    state.prefsFlushPromise = (async () => {
-      try {
+    // 等前一轮完成后，再以当前 pending 重新结算；关闭路径也不依赖 80ms 重试定时器。
+    while (state.prefsFlushPromise) {
+      try { await state.prefsFlushPromise; } catch { }
+    }
+    if (!Object.keys(state.pendingPrefs || {}).length) return true;
+    const run = (async () => {
+      let allOk = true;
+      for (let iteration = 0; iteration < 6; iteration++) {
+        const entries = Object.entries(state.pendingPrefs || {});
+        if (!entries.length) break;
         const snapshot = [];
-        for (const field of fields) {
-          const entry = state.pendingPrefs[field];
-          if (!entry) continue;
-          let version = 0;
-          try { version = Number(await entry.versionPromise) || 0; } catch { version = 0; }
-          // 等待版本期间同字段被用户再次修改：这次旧值不能再提交
-          if (!state.pendingPrefs[field] || state.pendingPrefs[field].changeId !== entry.changeId) continue;
-          if (state.client.isPersistent && !version) {
-            setSaveState("设置等待宿主版本，稍后重试");
-            continue;
-          }
-          snapshot.push({ field, value: entry.value, version, changeId: entry.changeId });
+        let grantFailed = false;
+        for (const [field, entry] of entries) {
+          let grant = "";
+          try {
+            const granted = await entry.grantPromise;
+            grant = granted && granted.grant || "";
+            if (!grant) grantFailed = true;
+          } catch { grantFailed = true; }
+          if (!grant) continue;
+          const current = state.pendingPrefs[field];
+          if (!current || current.changeId !== entry.changeId) continue;
+          snapshot.push({ field, value: entry.value, changeId: entry.changeId, grant });
         }
-        if (!snapshot.length) return false;
-        const patch = {}, versions = {};
-        for (const it of snapshot) { patch[it.field] = it.value; versions[it.field] = it.version; }
-        const bookId = state.book ? state.book.bookId : "";
-        const res = await state.client.savePreferences(patch, versions, bookId);
+        if (grantFailed) { allOk = false; setSaveState("设置授权失败，未保存"); setStatus("阅读设置未取得宿主授权，未保存", true); break; }
+        if (!snapshot.length) { allOk = false; break; }
+        const patch = {}, grants = {};
+        for (const item of snapshot) { patch[item.field] = item.value; grants[item.field] = item.grant; }
+        let res;
+        try {
+          res = await state.client.savePreferences(patch, grants, "global");
+        } catch (e) {
+          allOk = false;
+          setSaveState("设置未保存");
+          setStatus("阅读设置保存失败：" + (e && (e.message || e.code) || e), true);
+          break;
+        }
         const applied = new Set((res && res.applied) || []);
-        const rejected = new Set((res && res.rejected) || []);
         let cleared = 0;
-        for (const it of snapshot) {
-          const current = state.pendingPrefs[it.field];
-          if (!current || current.changeId !== it.changeId) continue;   // 期间又改了，保留新值
-          if (applied.has(it.field)) { delete state.pendingPrefs[it.field]; cleared++; }
-          else if (rejected.has(it.field)) {
-            // 过期/被拒不能伪装成功；保留 pending，提示需要用户再操作或失败
-            current.stale = true;
-            setStatus("设置字段被较早版本拒绝，未覆盖较新窗口设置：" + it.field, true);
-          }
+        for (const item of snapshot) {
+          const current = state.pendingPrefs[item.field];
+          if (!current || current.changeId !== item.changeId) continue;
+          if (applied.has(item.field)) { delete state.pendingPrefs[item.field]; cleared++; }
         }
-        if (cleared) setSaveState(state.client.isPersistent ? "设置已保存" : "设置已保存在当前窗口");
-        else setSaveState("设置未保存，可重试");
-        // 在途期间出现的同字段新修改已经替换 pending；为它再排一次提交，而不是丢掉
-        const pendingEntries = Object.entries(state.pendingPrefs || {}).filter(([, v]) => v && !v.stale);
-        if (pendingEntries.length) {
-          clearTimeout(state.prefsRetryTimer);
-          state.prefsRetryTimer = setTimeout(() => { state.prefsRetryTimer = 0; flushPrefs(); }, 80);
+        if (!cleared) {
+          allOk = false;
+          setSaveState("设置未被确认，未保存");
+          setStatus("阅读设置没有被宿主确认，未清空 pending", true);
+          break;
         }
-        return cleared > 0;
-      } catch (e) {
-        setSaveState("设置未保存，可重试");
-        setStatus("阅读设置保存失败：" + (e && e.message || e), true);
-        return false;
+        setSaveState(state.client.isPersistent ? "设置已保存" : "设置已保存在当前窗口");
+        if (!Object.keys(state.pendingPrefs || {}).length) break;
+        // 在途期间出现的新修改进入下一轮；同一 flush 内结清，不依赖退出后的后台定时器。
       }
+      if (Object.keys(state.pendingPrefs || {}).length) allOk = false;
+      return allOk;
     })();
-    try { return await state.prefsFlushPromise; }
-    finally { state.prefsFlushPromise = null; }
+    state.prefsFlushPromise = run;
+    try { return await run; }
+    finally { if (state.prefsFlushPromise === run) state.prefsFlushPromise = null; }
   }
 
   function schedulePrefsSave() {
+    if (state.finalizing) return;
     clearTimeout(state.prefsSaveTimer);
     state.prefsSaveTimer = setTimeout(() => { state.prefsSaveTimer = 0; flushPrefs(); }, 300);
   }
@@ -296,8 +308,8 @@
   function markInteraction() {
     if (!state.book) return 0;
     state.modified = true;
+    state.saveOpVersion++;
     if (state.client.isPersistent) {
-      // 每次真实用户操作申请新的交互资格；定时保存只 await 这个结果，不会重新申请
       const bookId = state.book.bookId;
       state.interactionPromise = (async () => {
         try {
@@ -325,61 +337,126 @@
     };
   }
 
+  function saveFailedSnapshot(snapshot) {
+    const existing = state.failedSaves.get(snapshot.bookId);
+    if (existing && Number(existing.opVersion) > Number(snapshot.opVersion)) return; // 新操作失败快照不能被旧操作覆盖
+    state.failedSaves.set(snapshot.bookId, snapshot);
+  }
+
   async function retryFailedSaveForCurrent() {
     if (!state.book || !state.ready || !state.client) return false;
     const snapshot = state.failedSaves.get(state.book.bookId);
     if (!snapshot) return false;
-    try {
-      await state.client.savePosition(snapshot.bookId, snapshot.pos, snapshot.token || 0);
+    // 磁盘/宿主已经是更晚修订：旧快照不得覆盖新状态
+    if (Number(state.lastRevision) > Number(snapshot.baseRevision)) {
       state.failedSaves.delete(snapshot.bookId);
+      setStatus("磁盘已有更新位置，丢弃旧失败快照", true);
+      return false;
+    }
+    try {
+      const res = await state.client.savePosition(
+        snapshot.bookId, snapshot.pos, snapshot.token || 0,
+        snapshot.sequence, snapshot.operationId,
+      );
+      state.lastRevision = Number(res.revision) || state.lastRevision;
+      const current = state.failedSaves.get(snapshot.bookId);
+      if (!current || Number(current.opVersion) <= Number(snapshot.opVersion)) state.failedSaves.delete(snapshot.bookId);
       if (state.bookId === snapshot.bookId) { setSaveState(state.client.isPersistent ? "已保存阅读位置" : "位置已保存在当前窗口"); state.saveFailed = false; }
       return true;
     } catch (e) {
-      if (e && e.code === "STALE_INTERACTION") setStatus("旧书失败位置已过期，不能覆盖当前窗口位置", true);
+      if (e && (e.code === "STALE_INTERACTION" || e.code === "STALE_SEQUENCE" || e.code === "TOKEN_OWNER_MISMATCH"))
+        setStatus("旧书失败位置已过期，不能覆盖当前窗口位置", true);
       else setStatus("原书失败位置重试未成功：" + (e && (e.code || e.message) || e), true);
       return false;
     }
   }
 
+  /** 重开原书时先裁决磁盘状态与失败快照：只有快照基准不旧于磁盘才允许重试，成功后用快照位置恢复可见页。 */
+  async function resolveFailedSnapshotOnOpen(bookId, loaded) {
+    const snapshot = state.failedSaves.get(bookId);
+    if (!snapshot) return null;
+    if (Number(loaded && loaded.revision || 0) > Number(snapshot.baseRevision)) {
+      state.failedSaves.delete(bookId);
+      return null;
+    }
+    try {
+      const res = await state.client.savePosition(
+        bookId, snapshot.pos, snapshot.token || 0,
+        state.client.nextSequence(), snapshot.operationId,
+      );
+      state.lastRevision = Number(res.revision) || Number(loaded && loaded.revision) || 0;
+      const current = state.failedSaves.get(bookId);
+      if (!current || Number(current.opVersion) <= Number(snapshot.opVersion)) state.failedSaves.delete(bookId);
+      return { pos: snapshot.pos, revision: state.lastRevision };
+    } catch (e) {
+      setStatus("保留的失败位置尚未确认，未覆盖较新状态：" + (e && (e.code || e.message) || e), true);
+      return null;
+    }
+  }
+
   function scheduleSave(delay = 360) {
     if (!state.book || !state.modified || !state.ready) return;
+    if (state.finalizing) return;
     clearTimeout(state.saveTimer);
     state.saveTimer = setTimeout(() => { state.saveTimer = 0; flushSave(); }, delay);
   }
 
-  async function flushSave() {
-    if (!state.book || !state.ready || !state.modified) return false;
+  async function flushSave(force = false) {
+    // 串行化保存：后来的页面/关闭等待前一笔结束，再对当前操作结算
+    while (state.saveFlushPromise) { try { await state.saveFlushPromise; } catch { } }
+    if (!state.book || !state.ready) return true;
+    if (!state.modified && !force) return true;
+    const run = flushSaveOnce(force);
+    state.saveFlushPromise = run;
+    try { return await run; }
+    finally { if (state.saveFlushPromise === run) state.saveFlushPromise = null; }
+  }
+
+  async function flushSaveOnce(force = false) {
+    if (!state.book || !state.ready) return true;   // 无书/未就绪没有位置目标；不是失败
+    if (!state.modified && !force) return true;
     try { paginator.settleForSnapshot(); } catch { }
-    // ★ 快照冻结：等待交互资格/写入期间即使换书，也不会把坐标写到新书上
+    // 操作快照：book/OpenIntent/opVersion/tokenPromise/sequence 都在操作发起时冻结
     const snapshot = {
       bookId: state.book.bookId,
-      pos: capturePosition(),
+      openIntent: state.openIntent,
       seqBook: state.book,
-      wasPersistent: state.client.isPersistent,
+      pos: capturePosition(),
+      opVersion: state.saveOpVersion,
+      sequence: state.client.nextSequence(),
+      operationId: nextOperationId("pos-op-"),
       token: 0,
+      tokenPromise: state.interactionPromise,
+      baseRevision: Number(state.lastRevision) || 0,
+      wasPersistent: state.client.isPersistent,
     };
-    if (!snapshot.pos) return false;
+    if (!snapshot.pos) return true;
+    if (snapshot.tokenPromise) { try { await snapshot.tokenPromise; } catch { } }
+    // 等待期间不能再从全局 token 补装；该操作使用发起时捕获的资格
     const tokenPromise = state.interactionPromise;
-    if (tokenPromise) { try { await tokenPromise; } catch { } }
-    snapshot.token = state.interactionToken || 0;
+    if (!snapshot.token && tokenPromise && tokenPromise !== state.interactionPromise) { try { snapshot.token = await tokenPromise || 0; } catch { } }
+    else snapshot.token = snapshot.token || state.interactionToken || 0;
+    if (snapshot.tokenPromise === tokenPromise) snapshot.token = snapshot.token || state.interactionToken || 0;
     if (state.client.isPersistent && !snapshot.token) {
       setSaveState("等待用户操作后再保存");
-      state.failedSaves.set(snapshot.bookId, snapshot);
+      saveFailedSnapshot(snapshot);
       return false;
     }
     try {
       setSaveState("正在保存…");
-      await state.client.savePosition(snapshot.bookId, snapshot.pos, snapshot.token);
-      state.failedSaves.delete(snapshot.bookId);
-      if (state.bookId === snapshot.bookId) {
+      const res = await state.client.savePosition(snapshot.bookId, snapshot.pos, snapshot.token, snapshot.sequence, snapshot.operationId);
+      state.lastRevision = Number(res.revision) || state.lastRevision;
+      const pendingFailure = state.failedSaves.get(snapshot.bookId);
+      if (!pendingFailure || Number(pendingFailure.opVersion) <= Number(snapshot.opVersion)) state.failedSaves.delete(snapshot.bookId);
+      if (state.bookId === snapshot.bookId && state.openIntent === snapshot.openIntent) {
         state.saveFailed = false;
         setSaveState(state.client.isPersistent ? "已保存阅读位置" : "位置已保存在当前窗口");
-        if (state.book === snapshot.seqBook && capturePosition()?.locator?.textOffset === snapshot.pos.locator?.textOffset) state.modified = false;
+        if (state.book === snapshot.seqBook && state.saveOpVersion === snapshot.opVersion) state.modified = false;
       }
       return true;
     } catch (e) {
-      // 失败快照保留，换书/重开/恢复存储后仍可用原资格重试；不申请新资格
-      state.failedSaves.set(snapshot.bookId, snapshot);
+      // 失败快照冻结原操作身份与基准修订，之后只能用原资格重试
+      saveFailedSnapshot(snapshot);
       if (state.bookId === snapshot.bookId) {
         state.saveFailed = true;
         setSaveState("位置未保存，会在原书重试");
@@ -695,7 +772,8 @@
     const bookId = state.book.bookId;
     const openIntent = state.openIntent;
     clearTurnQueue();
-    await navigateToSpine(result.spineIndex, { save: true, reason: "search", searchResult: result });
+    const searchContext = { bookId, openIntent, queryGen: result.queryGen, query: result.query || $("searchInput").value.trim() };
+    await navigateToSpine(result.spineIndex, { save: true, reason: "search", searchResult: result, searchContext });
     if (bookId !== state.bookId || openIntent !== state.openIntent || result.queryGen !== state.searchGen) return;
     const markText = (() => {
       try { return paginator.doc.querySelector(".lyra-search-mark")?.textContent || ""; } catch { return ""; }
@@ -865,7 +943,7 @@
     state.pageIndex = index;
     state.pageCount = count;
     updatePageUi();
-    if (meta && (meta.reason === "next" || meta.reason === "prev" || meta.reason === "go")) {
+    if (meta && (meta.reason === "next" || meta.reason === "prev" || meta.reason === "go") && meta.reason !== "layout-restore") {
       state.modified = true;
       scheduleSave();
     }
@@ -874,9 +952,11 @@
   /* ---------------- 章节导航 ---------------- */
   async function navigateToSpine(index, opts = {}) {
     if (!state.book) return false;
-    index = clamp(Number(index) || 0, 0, state.book.spine.length - 1);
+    // 整段导航绑定原 book 实例；旧书迟到任务只能释放旧书自己的 owner，不能碰当前新书。
+    const navBook = state.book;
+    index = clamp(Number(index) || 0, 0, navBook.spine.length - 1);
     const gen = ++state.navGeneration;
-    const previousOwner = state.prepared && state.prepared.owner ? state.prepared.owner : 0;
+    const previousOwner = state.prepared && state.prepared.book === navBook && state.prepared.owner ? state.prepared.owner : 0;
     let preparedForRelease = null;
     state.busy = true;
     state.ready = false;
@@ -886,9 +966,9 @@
     showPageFrame();
     await new Promise((r) => requestAnimationFrame(r));
     try {
-      const prepared = await state.book.prepareSection(index);
+      const prepared = await navBook.prepareSection(index);
       preparedForRelease = prepared;
-      if (gen !== state.navGeneration) { state.book.releaseTask(prepared.owner); return false; }
+      if (gen !== state.navGeneration) { try { (prepared.book || navBook).releaseTask(prepared.owner); } catch { } return false; }
       await paginator.setSection(prepared, {
         anchor: opts.anchor || null,
         page: Number.isFinite(opts.page) ? opts.page : null,
@@ -900,7 +980,7 @@
         selectable: state.prefs.selectable,
         reduceMotion: state.prefs.reduceMotion,
       });
-      if (gen !== state.navGeneration) { state.book.releaseTask(prepared.owner); return false; }
+      if (gen !== state.navGeneration) { try { (prepared.book || navBook).releaseTask(prepared.owner); } catch { } return false; }
       state.spineIndex = index;
       state.prepared = prepared;
       state.pageIndex = paginator.pageIndex;
@@ -909,14 +989,21 @@
       state.busy = false;
       hideLoading();
       hideError();
-      if (previousOwner && previousOwner !== prepared.owner) { try { state.book.releaseTask(previousOwner); } catch { } }
-      try { state.book.releaseResourcesExcept(prepared.resources); } catch { }
+      if (previousOwner && previousOwner !== prepared.owner) { try { navBook.releaseTask(previousOwner); } catch { } }
+      try { navBook.releaseResourcesExcept(prepared.resources); } catch { }
       if (opts.page === "last") {
         paginator.goToPage(paginator.pageCount - 1, { animate: false, notify: true });
         state.pageIndex = paginator.pageIndex;
       }
       if (opts.fragment) await goToFragment(opts.fragment);
-      if (opts.searchResult) await applySearchResult(opts.searchResult);
+      if (opts.searchResult) {
+        if (opts.searchContext && !isSearchContextCurrent(opts.searchContext)) {
+          try { paginator.clearHighlights(); } catch { }
+          setStatus("搜索结果已过期，未落地旧查询高亮", true);
+        } else {
+          await applySearchResult(opts.searchResult, opts.searchContext);
+        }
+      }
       updateTocActive();
       updatePageUi();
       if (opts.save && state.modified) {
@@ -927,8 +1014,9 @@
       processTurns();
       return true;
     } catch (e) {
-      if (gen !== state.navGeneration) { if (preparedForRelease) { try { state.book.releaseTask(preparedForRelease.owner); } catch { } } return false; }
-      if (preparedForRelease) { try { state.book.releaseTask(preparedForRelease.owner); } catch { } }
+      const releaseBook = (preparedForRelease && preparedForRelease.book) || (preparedForRelease && navBook) || navBook;
+      if (gen !== state.navGeneration) { if (preparedForRelease) { try { releaseBook.releaseTask(preparedForRelease.owner); } catch { } } return false; }
+      if (preparedForRelease) { try { releaseBook.releaseTask(preparedForRelease.owner); } catch { } }
       state.busy = false;
       state.ready = !!paginator && !!paginator.doc;
       showError("章节载入失败：" + (e.message || e), () => navigateToSpine(index, opts));
@@ -951,8 +1039,17 @@
     updatePageUi();
   }
 
-  async function applySearchResult(result) {
-    if (!paginator || !paginator.doc) return;
+  function isSearchContextCurrent(context) {
+    if (!context) return true;
+    return context.bookId === state.bookId &&
+      context.openIntent === state.openIntent &&
+      context.queryGen === state.searchGen &&
+      (!context.query || $("searchInput").value.trim() === context.query);
+  }
+
+  async function applySearchResult(result, context) {
+    if (!paginator || !paginator.doc) return false;
+    if (!isSearchContextCurrent(context)) { setStatus("搜索结果已过期，未落地旧查询高亮", true); return false; }
     // 搜索与分页共用同一文字模型：用 offset/length 重建范围，重复词也能定位正确位置
     let range = Number.isFinite(result.offset)
       ? paginator.rangeAtTextOffset(result.offset, result.length || 0)
@@ -997,6 +1094,7 @@
     state.busy = true;
     state.modified = false;
     state.restored = false;
+    state.navGeneration++;   // 换书意图立即淘汰旧书未完成章节导航
     clearTurnQueue();
     state.lastOpen = { buffer, fileName, loadId: opts.loadId || "", manual: !!opts.manual };
     showPageFrame();
@@ -1006,8 +1104,13 @@
       const book = await bookModule.EpubBook.open(buffer, fileName);
       newBook = book;
       if (stale()) { book.destroy(); return false; }
-      const loaded = await state.client.load(book.bookId);
+      let loaded = await state.client.load(book.bookId);
       if (stale()) { book.destroy(); return false; }
+      // R4-04：重开时先裁决失败快照与新磁盘修订，再决定可见恢复位置
+      const resolvedFailure = await resolveFailedSnapshotOnOpen(book.bookId, loaded);
+      if (stale()) { book.destroy(); return false; }
+      state.lastRevision = resolvedFailure ? resolvedFailure.revision : (Number(loaded.revision) || 0);
+      if (resolvedFailure && resolvedFailure.pos) loaded = { ...loaded, position: resolvedFailure.pos };
 
       const legacy = state.client.migrateLegacy(fileName + ":" + buffer.byteLength);
       const prefs = normalizePrefs({ ...(legacy.preferences || {}), ...(loaded.preferences || {}) });
@@ -1060,7 +1163,6 @@
         setSaveState("位置将自动保存");
       }
       if (loaded.warnings && loaded.warnings.length) setStatus("已打开：" + book.title + "；" + loaded.warnings[0], true);
-      retryFailedSaveForCurrent();
       updatePageUi();
       return true;
     } catch (e) {
@@ -1298,9 +1400,10 @@
     try { clearTurnQueue(); } catch { }
     try { if (searchEngine) { searchEngine.cancel(); searchEngine = null; } } catch { }
     try { if (paginator) { paginator.cancelAnimation(); paginator.settleForSnapshot(); } } catch { }
-    let ok = true;
-    try { if (!(await flushPrefs())) { /* pending may be empty => true; false is retryable */ } } catch { ok = false; }
-    try { if (!(await flushSave())) { /* no modified position is success; failure already surfaced */ } } catch { ok = false; }
+    let prefsOk = true, saveOk = true;
+    try { prefsOk = await flushPrefs(); } catch { prefsOk = false; }
+    try { saveOk = await flushSave(); } catch { saveOk = false; }
+    const ok = !!(prefsOk && saveOk && !state.saveFailed && !Object.keys(state.pendingPrefs || {}).length);
     const revision = state.client ? (Number(state.client.lastRevision) || 0) : 0;
     try {
       window.chrome.webview.postMessage({

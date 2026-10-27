@@ -135,25 +135,38 @@
       text += data;
       segments.push({ node, start, end: text.length });
     };
-    const walk = (node, isRoot = false, inClosedDetails = false) => {
+    const isHiddenElement = (node) => {
+      if (!node || node.nodeType !== 1) return false;
+      if (node.hasAttribute && node.hasAttribute("hidden")) return true;
+      const style = (node.getAttribute && node.getAttribute("style")) || "";
+      if (/display\s*:\s*none/i.test(style) || /visibility\s*:\s*hidden/i.test(style)) return true;
+      // SVG presentation attributes；display/visibility 可继承到子树
+      const display = (node.getAttribute && node.getAttribute("display")) || "";
+      const visibility = (node.getAttribute && node.getAttribute("visibility")) || "";
+      if (/^none$/i.test(display) || /^hidden$/i.test(visibility)) return true;
+      return false;
+    };
+    const walk = (node, isRoot = false, hiddenContext = false) => {
       if (!node) return;
-      if (node.nodeType === 3) { if (!inClosedDetails) add(node, node.data); return; }
+      if (node.nodeType === 3) { if (!hiddenContext) add(node, node.data); return; }
       if (node.nodeType !== 1) return;
       const tag = (node.localName || "").toLowerCase();
-      if (tag === "br") { if (!inClosedDetails) text += "\n"; return; }
-      // 统一可见正文规则：hidden/aria-hidden、关闭 details 的非 summary、SVG defs/desc 不进入文字模型
-      if (!isRoot && !inClosedDetails) {
-        if (node.hasAttribute && (node.hasAttribute("hidden") || node.getAttribute("aria-hidden") === "true")) return;
-        if (tag === "defs" || tag === "desc") return;
+      // 可见性先于 br/块分隔判断：<br hidden> 不能制造换行
+      if (!isRoot && (hiddenContext || isHiddenElement(node))) return;
+      if (tag === "br") { text += "\n"; return; }
+      if (!isRoot) {
+        // 视觉可见正文：aria-hidden 仅影响可访问树，不据此排除屏幕文字；
+        // symbol 作为模板内容默认不直接绘制，defs/desc/title 不是正文。
+        if (tag === "defs" || tag === "desc" || tag === "title" || tag === "symbol") return;
       }
       if (tag === "details" && !node.hasAttribute("open")) {
         const summary = Array.from(node.children || []).find((c) => (c.localName || "").toLowerCase() === "summary");
         if (summary) walk(summary, false, false);
         return;
       }
-      const block = !isRoot && !inClosedDetails && TEXT_BLOCK_TAGS.has(tag);
+      const block = !isRoot && TEXT_BLOCK_TAGS.has(tag);
       if (block) text += "\n";
-      for (const child of Array.from(node.childNodes || [])) walk(child, false, inClosedDetails);
+      for (const child of Array.from(node.childNodes || [])) walk(child, false, false);
       if (block) text += "\n";
     };
     walk(root, true);
@@ -243,7 +256,13 @@
       if (doc.querySelector("parsererror")) throw new BookError("META-INF/encryption.xml 格式错误，无法判断加密资源", "ENCRYPTION_XML");
       const encrypted = Array.from(doc.getElementsByTagName("*")).filter((el) => (el.localName || "").toLowerCase() === "encrypteddata");
       if (!encrypted.length) return;
-      const fontTypes = /(font|opentype|truetype|ttf|otf|woff)/i;
+      const fontMimes = new Set([
+        "application/vnd.ms-opentype", "application/font-sfnt",
+        "application/font-otf", "application/font-ttf",
+        "font/otf", "font/ttf", "font/woff", "font/woff2",
+        "application/font-woff", "application/font-woff2",
+        "application/x-font-ttf", "application/x-font-opentype", "application/x-font-woff",
+      ]);
       let fontCount = 0;
       for (const data of encrypted) {
         const method = Array.from(data.getElementsByTagName("*")).find((el) => (el.localName || "").toLowerCase() === "encryptionmethod");
@@ -258,9 +277,15 @@
           const uri = ref.getAttribute("URI") || "";
           let path = normalizeSegments(uri, "");
           if (!path) path = normalizeSegments(uri, this.opfDir);
-          const item = (path && this.byPath.get(path)) || (path && this.byPath.get(this.opfDir + "/" + path));
-          if (!path || !item) throw new BookError("加密目标不在包内清单中：" + (uri || "空"), "UNKNOWN_ENCRYPTED_TARGET");
-          if (!fontTypes.test(item.mediaType || "")) throw new BookError("加密目标不是字体资源：" + (item.path || path), "ENCRYPTED_NON_FONT");
+          if (!path) throw new BookError("加密 CipherReference 路径非法：" + (uri || "空"), "UNKNOWN_ENCRYPTED_TARGET");
+          let item = this.byPath.get(path) || this.byPath.get(this.opfDir + "/" + path) || null;
+          if (!item) throw new BookError("加密目标不在包内清单中：" + (uri || "空"), "UNKNOWN_ENCRYPTED_TARGET");
+          // 目标必须确实存在于 ZIP，而不是只出现在 manifest；读取路径采用一次解析后的真实条目。
+          const actualPath = this._lookupEntry(item.path) ? item.path :
+            (this._lookupEntry(path) ? path : (this._lookupEntry(this.opfDir + "/" + path) ? this.opfDir + "/" + path : ""));
+          if (!actualPath) throw new BookError("加密目标在 ZIP 中不存在：" + (item.path || path), "ENCRYPTED_TARGET_MISSING");
+          const mime = String(item.mediaType || "").split(";")[0].trim().toLowerCase();
+          if (!fontMimes.has(mime)) throw new BookError("加密目标不是明确支持的字体 MIME：" + (item.path || path) + " (" + mime + ")", "ENCRYPTED_NON_FONT");
           fontCount++;
         }
       }
@@ -605,6 +630,7 @@
       const taskId = ++this._taskSeq;
       this._currentTaskId = taskId;   // 新章节任务使旧迟到任务的资源不得登记
       this._taskResources.set(taskId, new Set());
+      try {
       const text = await this.readText(sec.path);
       if (text == null) throw new BookError("章节文件不存在", "MISSING_SECTION");
       const doc = new DOMParser().parseFromString(text, "text/html");
@@ -703,6 +729,11 @@
         resources,
         book: self,
       };
+      } catch (e) {
+        // 任务在返回 owner 前失败也必须清理自己的任务集合（含空 Set）
+        try { this.releaseTask(taskId); } catch { }
+        throw e;
+      }
     }
 
     /** 无渲染提取章节纯文本（搜索/目录兜底/进度比例共用同一规则）。 */

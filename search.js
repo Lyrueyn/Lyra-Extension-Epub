@@ -7,6 +7,7 @@
   const MAX_CACHE_CHARS = 8 * 1024 * 1024;
   const MAX_RESULTS = 1000;
   const YIELD_EVERY = 6;
+  const SCAN_CHUNK = 64 * 1024;
 
   function normalize(s) {
     return String(s || "").replace(/\s+/g, " ").trim();
@@ -90,41 +91,52 @@
       if (!q) return { query: q, results: [], total: 0, truncated: false, chars: 0, scannedSections: 0, totalSections: 0 };
       const re = queryPattern(q);
       if (!re) return { query: q, results: [], total: 0, truncated: false, chars: 0, scannedSections: 0, totalSections: 0 };
-      const gen = this._generation;   // ★ 在 await 之前捕获查询身份
+      const gen = this._generation;   // 在 await 之前捕获查询身份
       const sections = await this.ensureIndex();
       if (gen !== this._generation) throw new Error("搜索已取消");
       const results = [];
       let total = 0, scanned = 0, errors = 0;
+      const overlap = Math.min(8192, Math.max(256, q.length * 4 + 256));
       for (const sec of sections) {
         if (gen !== this._generation) throw new Error("搜索已取消");
         const text = await this._textForSection(sec);
         if (gen !== this._generation) throw new Error("搜索已取消");
         scanned++;
         if (text == null) { errors++; continue; }
-        re.lastIndex = 0;
-        let m, local = 0;
-        while ((m = re.exec(text)) !== null) {
-          total++;
-          if (results.length < MAX_RESULTS) {
-            const start = m.index, end = start + m[0].length;
-            results.push({
-              id: "r-" + sec.index + "-" + start,
-              spineIndex: sec.index,
-              title: sec.title,
-              offset: start,
-              length: m[0].length,
-              quote: normalize(text.slice(Math.max(0, start - 24), end + 24)).slice(0, 120),
-              prefix: normalize(text.slice(Math.max(0, start - 32), start)),
-              suffix: normalize(text.slice(end, end + 32)),
-              snippet: normalize(text.slice(Math.max(0, start - 36), end + 48)),
-            });
+        // 按字符块扫描并让出，不以命中次数作为唯一让出条件：零命中和稀疏命中同样可取消。
+        let chunkStart = 0;
+        while (chunkStart < text.length) {
+          if (gen !== this._generation) throw new Error("搜索已取消");
+          const chunkEnd = Math.min(text.length, chunkStart + SCAN_CHUNK + overlap);
+          const chunk = text.slice(chunkStart, chunkEnd);
+          re.lastIndex = 0;
+          let m;
+          while ((m = re.exec(chunk)) !== null) {
+            const start = chunkStart + m.index;
+            const end = start + m[0].length;
+            total++;
+            if (results.length < MAX_RESULTS) {
+              results.push({
+                id: "r-" + sec.index + "-" + start,
+                spineIndex: sec.index,
+                title: sec.title,
+                offset: start,
+                length: m[0].length,
+                quote: normalize(text.slice(Math.max(0, start - 24), end + 24)).slice(0, 120),
+                prefix: normalize(text.slice(Math.max(0, start - 32), start)),
+                suffix: normalize(text.slice(end, end + 32)),
+                snippet: normalize(text.slice(Math.max(0, start - 36), end + 48)),
+              });
+            }
+            if (m[0].length === 0) re.lastIndex = Math.min(chunk.length, re.lastIndex + 1);
           }
-          if (m[0].length === 0) re.lastIndex++;
-          if ((++local % 128) === 0) {
-            await yieldTask();
-            if (gen !== this._generation) throw new Error("搜索已取消");
-          }
+          chunkStart = chunkEnd;
+          await yieldTask();
+          if (gen !== this._generation) throw new Error("搜索已取消");
         }
+        // 章与章之间再让出一次，保证大量短章节零命中时也能取消
+        await yieldTask();
+        if (gen !== this._generation) throw new Error("搜索已取消");
       }
       const truncated = this._cacheTruncated || errors > 0 || total > results.length;
       return {
