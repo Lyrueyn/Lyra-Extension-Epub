@@ -489,7 +489,6 @@
 
     locateAnchor(anchor) {
       if (!this.doc || !this.content || !anchor) return 0;
-      const doc = this.doc;
       const W = this.pageW;
       const model = this.getTextModel();
       const pageForRect = (rect) => {
@@ -497,15 +496,26 @@
         const x = rect.left + this.scrollPos;
         return clamp(Math.floor((x + 1) / (W + GAP)), 0, this.pageCount - 1);
       };
-      // 1) 稳定文字偏移；若上下文不匹配再按 quote 搜索
-      let offset = Number(anchor.textOffset);
+      const hasTextOffset = typeof anchor.textOffset === "number" && Number.isFinite(anchor.textOffset);
+      const hasElementPath = Array.isArray(anchor.elementPath) && anchor.elementPath.length > 0;
+      let offset = hasTextOffset ? anchor.textOffset : null;
       let range = null;
-      if (Number.isFinite(offset)) {
+      if (hasTextOffset) {
         offset = clamp(offset, 0, model.text.length);
         const q = normalizeText(anchor.quote || "");
         const near = normalizeText(model.text.slice(Math.max(0, offset - 32), offset + 32));
         if (!q || near.includes(q.slice(0, 18)) || q.includes(near.slice(0, 18))) {
           range = this.rangeAtTextOffset(offset, 0);
+        }
+      }
+      // 纯图/元素锚点：NULL textOffset 绝不能变成文字 0 去抢第一页
+      if (!range && hasElementPath && !hasTextOffset) {
+        const el = elementAtPath(this.content, anchor.elementPath);
+        if (el) {
+          const rect = typeof el.getBoundingClientRect === "function" ? el.getBoundingClientRect() : null;
+          if (rect && rect.width + rect.height > 0) return pageForRect(rect);
+          const idx = this.elementPage(el);
+          if (Number.isFinite(idx) && idx >= 0) return idx;
         }
       }
       if (!range && anchor.quote) {
@@ -529,12 +539,13 @@
         const idx = pageForRect(rect);
         if (idx != null) return idx;
       }
-      // 2) 纯图页元素路径
-      if (Array.isArray(anchor.elementPath)) {
+      if (hasElementPath) {
         const el = elementAtPath(this.content, anchor.elementPath);
-        if (el) return pageForRect(el.getBoundingClientRect()) || 0;
+        if (el) {
+          const idx = this.elementPage(el);
+          if (Number.isFinite(idx)) return idx;
+        }
       }
-      // 3) 章节内相对进度
       if (Number.isFinite(anchor.chapterFraction)) {
         return clamp(Math.round(anchor.chapterFraction * (this.pageCount - 1)), 0, this.pageCount - 1);
       }

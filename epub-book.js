@@ -135,14 +135,25 @@
       text += data;
       segments.push({ node, start, end: text.length });
     };
-    const walk = (node, isRoot = false) => {
+    const walk = (node, isRoot = false, inClosedDetails = false) => {
       if (!node) return;
-      if (node.nodeType === 3) { add(node, node.data); return; }
+      if (node.nodeType === 3) { if (!inClosedDetails) add(node, node.data); return; }
       if (node.nodeType !== 1) return;
-      if (node.localName === "br") { text += "\n"; return; }
-      const block = !isRoot && TEXT_BLOCK_TAGS.has((node.localName || "").toLowerCase());
+      const tag = (node.localName || "").toLowerCase();
+      if (tag === "br") { if (!inClosedDetails) text += "\n"; return; }
+      // 统一可见正文规则：hidden/aria-hidden、关闭 details 的非 summary、SVG defs/desc 不进入文字模型
+      if (!isRoot && !inClosedDetails) {
+        if (node.hasAttribute && (node.hasAttribute("hidden") || node.getAttribute("aria-hidden") === "true")) return;
+        if (tag === "defs" || tag === "desc") return;
+      }
+      if (tag === "details" && !node.hasAttribute("open")) {
+        const summary = Array.from(node.children || []).find((c) => (c.localName || "").toLowerCase() === "summary");
+        if (summary) walk(summary, false, false);
+        return;
+      }
+      const block = !isRoot && !inClosedDetails && TEXT_BLOCK_TAGS.has(tag);
       if (block) text += "\n";
-      for (const child of Array.from(node.childNodes || [])) walk(child, false);
+      for (const child of Array.from(node.childNodes || [])) walk(child, false, inClosedDetails);
       if (block) text += "\n";
     };
     walk(root, true);
@@ -173,7 +184,10 @@
       this.bookId = "";
       this.sectionTitleCache = new Map();
       this._resources = new Map();   // path -> { url, mime }
-      this._resourcePending = new Map(); // path -> Promise<string>
+      this._resourcePending = new Map(); // path -> { promise, taskId }
+      this._taskSeq = 0;
+      this._currentTaskId = 0;
+      this._taskResources = new Map();
       this._destroyed = false;
     }
 
@@ -205,18 +219,6 @@
       if (!this.opfPath) throw new BookError("OPF 路径非法", "BAD_OPF_PATH");
       this.opfDir = dirOf(this.opfPath);
 
-      if (this._lookupEntry("META-INF/encryption.xml")) {
-        const enc = await this.readText("META-INF/encryption.xml", true);
-        if (enc) {
-          const doc = new DOMParser().parseFromString(enc, "application/xml");
-          const methods = Array.from(doc.getElementsByTagName("*")).filter((el) => (el.localName || "").toLowerCase() === "encryptionmethod");
-          const obfuscationOnly = methods.length > 0 && methods.every((m) => /(idpf|font|obfuscat)/i.test(m.getAttribute("Algorithm") || ""));
-          if (!obfuscationOnly) throw new BookError("这本 EPUB 的正文资源受加密保护（非仅字体混淆），本轮不支持解密", "DRM");
-          // 仅字体混淆：允许打开，统一使用系统字体，不尝试解析被混淆字体
-          this.fontObfuscated = true;
-        }
-      }
-
       const opfText = await this.readText(this.opfPath);
       if (!opfText) throw new BookError("OPF 文件读取失败", "BAD_OPF");
       const opf = new DOMParser().parseFromString(opfText, "application/xml");
@@ -224,12 +226,47 @@
 
       this._parseMetadata(opf);
       this._parseManifest(opf);
+      await this._validateEncryption();
       this._parseSpine(opf);
       if (!this.spine.length) throw new BookError("这本 EPUB 没有可读的正文顺序（spine 为空）", "EMPTY_SPINE");
       await this._parseToc(opf);
       this._buildFallbackTocIfNeeded();
       this._computeFlatToc();
       await this._computeBookId();
+    }
+
+    async _validateEncryption() {
+      if (!this._lookupEntry("META-INF/encryption.xml")) return;
+      const enc = await this.readText("META-INF/encryption.xml", true);
+      if (!enc) return;
+      const doc = new DOMParser().parseFromString(enc, "application/xml");
+      if (doc.querySelector("parsererror")) throw new BookError("META-INF/encryption.xml 格式错误，无法判断加密资源", "ENCRYPTION_XML");
+      const encrypted = Array.from(doc.getElementsByTagName("*")).filter((el) => (el.localName || "").toLowerCase() === "encrypteddata");
+      if (!encrypted.length) return;
+      const fontTypes = /(font|opentype|truetype|ttf|otf|woff)/i;
+      let fontCount = 0;
+      for (const data of encrypted) {
+        const method = Array.from(data.getElementsByTagName("*")).find((el) => (el.localName || "").toLowerCase() === "encryptionmethod");
+        const algo = method ? (method.getAttribute("Algorithm") || "") : "";
+        // 只支持 IDPF 标准字体混淆；Adobe 等其它算法按明确不支持处理，不因字符串含 font/idpf 就放行
+        if (algo !== "http://www.idpf.org/2008/embedding") {
+          throw new BookError("这本 EPUB 使用了不支持的加密/混淆算法：" + (algo || "未知"), "UNSUPPORTED_ENCRYPTION");
+        }
+        const refs = Array.from(data.getElementsByTagName("*")).filter((el) => (el.localName || "").toLowerCase() === "cipherreference");
+        if (!refs.length) throw new BookError("加密声明缺少 CipherReference，无法确认受保护资源", "BAD_ENCRYPTION");
+        for (const ref of refs) {
+          const uri = ref.getAttribute("URI") || "";
+          let path = normalizeSegments(uri, "");
+          if (!path) path = normalizeSegments(uri, this.opfDir);
+          const item = (path && this.byPath.get(path)) || (path && this.byPath.get(this.opfDir + "/" + path));
+          if (!path || !item) throw new BookError("加密目标不在包内清单中：" + (uri || "空"), "UNKNOWN_ENCRYPTED_TARGET");
+          if (!fontTypes.test(item.mediaType || "")) throw new BookError("加密目标不是字体资源：" + (item.path || path), "ENCRYPTED_NON_FONT");
+          fontCount++;
+        }
+      }
+      if (fontCount === 0) throw new BookError("加密声明没有可识别的字体目标", "BAD_ENCRYPTION");
+      // 只有全部受保护目标都是受支持的字体混淆时，才统一使用系统字体继续阅读
+      this.fontObfuscated = true;
     }
 
     _parseMetadata(opf) {
@@ -503,34 +540,61 @@
       try { return await entry.async("uint8array"); } catch { return null; }
     }
 
-    async _resourceUrl(path, fragment = "") {
-      const base = await this._resourceBaseUrl(path);
+    async _resourceUrl(path, fragment = "", taskId = 0) {
+      const base = await this._resourceBaseUrl(path, taskId);
       if (!base) return "";
       if (!fragment) return base;
       return base + "#" + encodeURIComponent(String(fragment)).replace(/%2F/gi, "/");
     }
 
-    async _resourceBaseUrl(path) {
-      if (this._resources.has(path)) return this._resources.get(path).url;
-      if (this._resourcePending.has(path)) return this._resourcePending.get(path);
+    _rememberTaskResource(taskId, path) {
+      if (!taskId) return;
+      if (!this._taskResources.has(taskId)) this._taskResources.set(taskId, new Set());
+      this._taskResources.get(taskId).add(path);
+    }
+
+    releaseTask(taskId) {
+      if (!taskId) return;
+      const paths = this._taskResources.get(taskId);
+      this._taskResources.delete(taskId);
+      if (!paths) return;
+      const keep = this._taskResources.get(this._currentTaskId);
+      for (const path of paths) {
+        if (keep && keep.has(path)) continue;
+        const rec = this._resources.get(path);
+        if (rec) { try { URL.revokeObjectURL(rec.url); } catch { } this._resources.delete(path); }
+      }
+    }
+
+    async _resourceBaseUrl(path, taskId = 0) {
+      if (this._resources.has(path)) { this._rememberTaskResource(taskId, path); return this._resources.get(path).url; }
+      const pending = this._resourcePending.get(path);
+      if (pending) {
+        const url = await pending.promise;
+        if (url) return url;
+        if (taskId && taskId === this._currentTaskId) return this._resourceBaseUrl(path, taskId);
+        return "";
+      }
       const promise = (async () => {
         try {
           const bytes = await this.readBytes(path);
           if (!bytes || this._destroyed) return "";
+          // 同书旧章节任务：读取挂起期间新章已成为当前任务，旧的迟到结果不能登记
+          if (taskId && taskId !== this._currentTaskId) return "";
           const item = this.byPath.get(path);
           const mime = mediaTypeFor(path, item);
           const blob = new Blob([bytes], { type: mime });
           const url = makeBlobUrl(blob);
           if (!url) return "";
-          // 异步读取期间书/章节被销毁：迟到的 URL 必须立刻回收，不能登记
-          if (this._destroyed) { try { URL.revokeObjectURL(url); } catch { } return ""; }
+          if (this._destroyed || (taskId && taskId !== this._currentTaskId)) { try { URL.revokeObjectURL(url); } catch { } return ""; }
           this._resources.set(path, { url, mime });
+          this._rememberTaskResource(taskId, path);
           return url;
         } finally {
           this._resourcePending.delete(path);
         }
       })();
-      this._resourcePending.set(path, promise);
+      this._resourcePending.set(path, { promise, taskId });
       return promise;
     }
 
@@ -538,6 +602,9 @@
     async prepareSection(index) {
       const sec = this.spine[index];
       if (!sec) throw new BookError("章节不存在", "BAD_SECTION");
+      const taskId = ++this._taskSeq;
+      this._currentTaskId = taskId;   // 新章节任务使旧迟到任务的资源不得登记
+      this._taskResources.set(taskId, new Set());
       const text = await this.readText(sec.path);
       if (text == null) throw new BookError("章节文件不存在", "MISSING_SECTION");
       const doc = new DOMParser().parseFromString(text, "text/html");
@@ -603,7 +670,7 @@
           }
           return;
         }
-        const url = await this._resourceUrl(ref.path, ref.fragment || "");
+        const url = await this._resourceUrl(ref.path, ref.fragment || "", taskId);
         if (url) {
           el.setAttribute(attr, url);
           resources.push(ref.path);
@@ -630,6 +697,7 @@
       return {
         index,
         path: sec.path,
+        owner: taskId,
         title: await this.sectionTitle(index),
         html: body.innerHTML,
         resources,
@@ -667,6 +735,8 @@
 
     releaseResources() {
       this._destroyed = true;
+      this._currentTaskId = 0;
+      this._taskResources.clear();
       for (const { url } of this._resources.values()) { try { URL.revokeObjectURL(url); } catch { } }
       this._resources.clear();
       this._resourcePending.clear();
