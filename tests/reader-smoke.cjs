@@ -1,4 +1,4 @@
-/* 浏览器层回归：使用候选扩展文件和合成书，不修改安装目录/用户书库。
+﻿/* 浏览器层回归：使用候选扩展文件和合成书，不修改安装目录/用户书库。
  * 运行：node tests/reader-smoke.cjs
  * 环境：PLAYWRIGHT_MODULE、LYRA_BROWSER_PATH 可选（同 baseline-probe.cjs）。
  */
@@ -63,6 +63,7 @@ function record(id, name, status, detail) {
   const base = "http://127.0.0.1:" + server.address().port;
   const browser = await chromium.launch({ headless: true, executablePath: process.env.LYRA_BROWSER_PATH });
   const context = await browser.newContext({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 1 });
+  await context.addInitScript(() => { window.__LYRA_TEST_MODE__ = true; });
   const page = await context.newPage();
   page.on("pageerror", e => errors.push(e.message));
   page.on("console", msg => { if (msg.type() === "error") errors.push("console:" + msg.text()); });

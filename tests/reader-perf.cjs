@@ -1,4 +1,4 @@
-/* 性能与资源压力：200 章合成书，测首屏/切章/查找、DOM/iframe/资源计数趋势。 */
+﻿/* 性能与资源压力：200 章合成书，测首屏/切章/查找、DOM/iframe/资源计数趋势。 */
 "use strict";
 const fs = require("node:fs");
 const path = require("node:path");
@@ -43,6 +43,7 @@ async function makeBook(chapters) {
   const base = "http://127.0.0.1:" + server.address().port;
   const browser = await chromium.launch({ headless: true, executablePath: process.env.LYRA_BROWSER_PATH });
   const context = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  await context.addInitScript(() => { window.__LYRA_TEST_MODE__ = true; });
   const page = await context.newPage();
   page.setDefaultTimeout(30000);
   const errors = [];

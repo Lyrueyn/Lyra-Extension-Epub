@@ -1,4 +1,4 @@
-/* 补充回归：EPUB2/NXC、书籍身份、长段落/表情/图片、重开书签、旧宿主重复投喂、静态动画、窄窗。 */
+﻿/* 补充回归：EPUB2/NXC、书籍身份、长段落/表情/图片、重开书签、旧宿主重复投喂、静态动画、窄窗。 */
 "use strict";
 const fs = require("node:fs");
 const path = require("node:path");
@@ -76,6 +76,7 @@ async function makeFixtures() {
     const orig = window.requestAnimationFrame;
     window.requestAnimationFrame = function (cb) { window.__rafCount++; return orig.call(window, cb); };
   });
+  await context.addInitScript(() => { window.__LYRA_TEST_MODE__ = true; });
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
   page.on("pageerror", e => errors.push(e.message));
@@ -132,7 +133,7 @@ async function makeFixtures() {
       return { page: d.paginator.pageIndex, located: d.paginator.locateAnchor(a), anchor: a };
     }, longAnchor);
     record("A10b", "long paragraph anchor survives font relayout",
-      longAfter.located === longAfter.page && Number.isFinite(longAnchor.offsetUtf16) ? "PASS" : "FAIL",
+      longAfter.located === longAfter.page && Number.isFinite(longAnchor.textOffset) ? "PASS" : "FAIL",
       { longAfter });
 
     // 纯图页恢复

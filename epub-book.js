@@ -30,20 +30,39 @@
     const parts = absolute ? [] : String(baseDir || "").split("/").filter(Boolean);
     for (const piece of path.split("/")) {
       if (!piece || piece === ".") continue;
-      if (piece === "..") {
+      // 只解码一次；编码后的点段/斜杠必须按解码后的语义处理，不能绕过包根限制
+      const decoded = decodeSafe(piece);
+      if (!decoded || decoded === ".") continue;
+      if (decoded === "..") {
         if (!parts.length) return null;      // 越出包根
         parts.pop();
-      } else {
-        parts.push(decodeSafe(piece));
+        continue;
       }
+      if (decoded.includes("/") || decoded.includes("\\")) return null;
+      parts.push(decoded);
     }
     return parts.join("/");
+  }
+
+  const SAFE_EXTERNAL_PROTOCOLS = new Set(["http:", "https:"]);
+
+  /** 清洗层与外层打开共同使用的协议白名单；危险协议标记 blocked，绝不转交。 */
+  function classifyExternalHref(href) {
+    const raw = String(href || "").trim();
+    if (!raw) return "";
+    try {
+      const url = new URL(raw, "https://lyra.invalid/");
+      if (SAFE_EXTERNAL_PROTOCOLS.has(url.protocol)) return raw;
+      return "blocked";
+    } catch { return "blocked"; }
   }
 
   function splitReference(href) {
     let s = String(href || "").trim();
     if (!s) return { path: "", fragment: "", query: "" };
     if (/^[a-z][a-z0-9+.-]*:/i.test(s) || s.startsWith("//")) {
+      const cls = classifyExternalHref(s);
+      if (cls === "blocked") return { blocked: true, external: false, path: s, fragment: "", query: "" };
       return { external: true, path: s, fragment: "", query: "" };
     }
     let fragment = "";
@@ -104,6 +123,32 @@
     return (clone.textContent || "").replace(/\u00a0/g, " ").replace(/\r\n?/g, "\n");
   }
 
+
+  const TEXT_BLOCK_TAGS = new Set(("address,article,aside,blockquote,br,dd,div,dl,dt,figcaption,figure,footer,h1,h2,h3,h4,h5,h6,header,hr,li,main,nav,ol,p,pre,section,table,tr,td,th,ul").split(","));
+  /** 统一文字模型：搜索、锚点、高亮共用；块级元素/换行插入 \n，文本节点记录映射。 */
+  function buildTextModel(root) {
+    const segments = [];
+    let text = "";
+    const add = (node, data) => {
+      if (!data) return;
+      const start = text.length;
+      text += data;
+      segments.push({ node, start, end: text.length });
+    };
+    const walk = (node, isRoot = false) => {
+      if (!node) return;
+      if (node.nodeType === 3) { add(node, node.data); return; }
+      if (node.nodeType !== 1) return;
+      if (node.localName === "br") { text += "\n"; return; }
+      const block = !isRoot && TEXT_BLOCK_TAGS.has((node.localName || "").toLowerCase());
+      if (block) text += "\n";
+      for (const child of Array.from(node.childNodes || [])) walk(child, false);
+      if (block) text += "\n";
+    };
+    walk(root, true);
+    return { text, segments };
+  }
+
   class BookError extends Error {
     constructor(message, code) { super(message); this.name = "BookError"; this.code = code || "EPUB_ERROR"; }
   }
@@ -123,10 +168,12 @@
       this.spine = [];               // { index, idref, path, linear, properties, href }
       this.toc = [];                 // tree: { title, path, fragment, children }
       this.tocFlat = [];
-      this.entries = new Map();      // decoded zip path -> zip entry
+      this.entries = new Map();      // ZIP 实际条目名 -> entry（不解码，避免空格与 %20 条目互相覆盖）
+      this._entryAliases = new Map(); // 解码后的名称别名 -> entry（仅无精确实际条目时使用）
       this.bookId = "";
       this.sectionTitleCache = new Map();
       this._resources = new Map();   // path -> { url, mime }
+      this._resourcePending = new Map(); // path -> Promise<string>
       this._destroyed = false;
     }
 
@@ -144,9 +191,9 @@
       for (const [name, entry] of Object.entries(this.zip.files)) {
         if (entry.dir) continue;
         const normalized = String(name).replaceAll("\\", "/").replace(/^\/+/, "");
-        this.entries.set(decodeSafe(normalized), entry);
-        // 有些 EPUB 的 ZIP 条目名本身是百分号编码，两种都登记
-        if (normalized !== decodeSafe(normalized)) this.entries.set(normalized, entry);
+        this.entries.set(normalized, entry);   // 实际条目名原样登记
+        const decoded = decodeSafe(normalized);
+        if (decoded !== normalized && !this._entryAliases.has(decoded)) this._entryAliases.set(decoded, entry);
       }
       const containerText = await this.readText("META-INF/container.xml", true);
       if (!containerText) throw new BookError("缺少 META-INF/container.xml", "NO_CONTAINER");
@@ -158,10 +205,15 @@
       if (!this.opfPath) throw new BookError("OPF 路径非法", "BAD_OPF_PATH");
       this.opfDir = dirOf(this.opfPath);
 
-      if (this.entries.has("META-INF/encryption.xml")) {
+      if (this._lookupEntry("META-INF/encryption.xml")) {
         const enc = await this.readText("META-INF/encryption.xml", true);
-        if (enc && /EncryptedData|EncryptionMethod/i.test(enc)) {
-          throw new BookError("这本 EPUB 受版权保护（包含加密资源），本轮不支持解密", "DRM");
+        if (enc) {
+          const doc = new DOMParser().parseFromString(enc, "application/xml");
+          const methods = Array.from(doc.getElementsByTagName("*")).filter((el) => (el.localName || "").toLowerCase() === "encryptionmethod");
+          const obfuscationOnly = methods.length > 0 && methods.every((m) => /(idpf|font|obfuscat)/i.test(m.getAttribute("Algorithm") || ""));
+          if (!obfuscationOnly) throw new BookError("这本 EPUB 的正文资源受加密保护（非仅字体混淆），本轮不支持解密", "DRM");
+          // 仅字体混淆：允许打开，统一使用系统字体，不尝试解析被混淆字体
+          this.fontObfuscated = true;
         }
       }
 
@@ -299,9 +351,15 @@
           const children = this._parseNavList({ querySelector: () => sub }, navPath);
           if (node) node.children = children;
           else if (children.length) {
-            // li 本身没有链接但有子项：子项挂到上一级
-            parsed.push(...children);
-            continue;
+            // EPUB3 常见分组 <li><span>第一部</span><ol>…</ol></li>：保留不可点击分组及层级
+            const titleEl = Array.from(li.children).find((c) => c !== sub && !["ol", "ul"].includes(c.localName));
+            const title = titleEl ? textOf(titleEl) : "";
+            if (title) {
+              node = { title, path: null, fragment: "", children, group: true };
+            } else {
+              parsed.push(...children);
+              continue;
+            }
           }
         }
         if (node) parsed.push(node);
@@ -414,6 +472,7 @@
     /** 统一包内引用解析：必须传入当前文档完整路径。 */
     resolveReference(currentDocumentPath, href) {
       const ref = splitReference(href);
+      if (ref.blocked) return { kind: "blocked", href: "", path: "", fragment: "" };
       if (ref.external) return { kind: "external", href: String(href || "").trim(), path: "", fragment: "" };
       if (!ref.path) {
         return { kind: "internal", path: currentDocumentPath, fragment: ref.fragment || "", query: ref.query || "" };
@@ -425,30 +484,54 @@
       return { kind, path, fragment: ref.fragment || "", query: ref.query || "" };
     }
 
+    _lookupEntry(path) {
+      if (this.entries.has(path)) return this.entries.get(path);
+      if (this._entryAliases.has(path)) return this._entryAliases.get(path);
+      return null;
+    }
+
     async readText(path, optional = false) {
-      const entry = this.entries.get(path);
+      const entry = this._lookupEntry(path);
       if (!entry) { if (optional) return null; throw new BookError("包内文件不存在：" + path, "MISSING_ENTRY"); }
       try { return await entry.async("string"); }
       catch (e) { if (optional) return null; throw new BookError("文件读取失败：" + path, "READ_ENTRY"); }
     }
 
     async readBytes(path) {
-      const entry = this.entries.get(path);
+      const entry = this._lookupEntry(path);
       if (!entry) return null;
       try { return await entry.async("uint8array"); } catch { return null; }
     }
 
-    async _resourceUrl(path) {
+    async _resourceUrl(path, fragment = "") {
+      const base = await this._resourceBaseUrl(path);
+      if (!base) return "";
+      if (!fragment) return base;
+      return base + "#" + encodeURIComponent(String(fragment)).replace(/%2F/gi, "/");
+    }
+
+    async _resourceBaseUrl(path) {
       if (this._resources.has(path)) return this._resources.get(path).url;
-      const bytes = await this.readBytes(path);
-      if (!bytes) return "";
-      const item = this.byPath.get(path);
-      const mime = mediaTypeFor(path, item);
-      const blob = new Blob([bytes], { type: mime });
-      const url = makeBlobUrl(blob);
-      if (!url) return "";
-      this._resources.set(path, { url, mime });
-      return url;
+      if (this._resourcePending.has(path)) return this._resourcePending.get(path);
+      const promise = (async () => {
+        try {
+          const bytes = await this.readBytes(path);
+          if (!bytes || this._destroyed) return "";
+          const item = this.byPath.get(path);
+          const mime = mediaTypeFor(path, item);
+          const blob = new Blob([bytes], { type: mime });
+          const url = makeBlobUrl(blob);
+          if (!url) return "";
+          // 异步读取期间书/章节被销毁：迟到的 URL 必须立刻回收，不能登记
+          if (this._destroyed) { try { URL.revokeObjectURL(url); } catch { } return ""; }
+          this._resources.set(path, { url, mime });
+          return url;
+        } finally {
+          this._resourcePending.delete(path);
+        }
+      })();
+      this._resourcePending.set(path, promise);
+      return promise;
     }
 
     /** 把章节 HTML 清洗成可放进禁脚本 iframe 的正文，并准备图片资源。 */
@@ -474,20 +557,26 @@
       for (const el of Array.from(body.querySelectorAll("*"))) {
         for (const attr of Array.from(el.attributes)) {
           const name = attr.name.toLowerCase();
-          if (name.startsWith("on")) el.removeAttribute(attr.name);
+          // 先删除书内自行伪造的内部控制属性，再由清洗逻辑重新建立可信数据
+          if (name.startsWith("data-lyra-")) el.removeAttribute(attr.name);
+          else if (name.startsWith("on")) el.removeAttribute(attr.name);
           else if (name === "style" || name === "srcdoc" || name === "formaction" || name === "action" || name === "target") el.removeAttribute(attr.name);
-          else if (name === "srcset" || name === "imagesrcset") el.removeAttribute(attr.name);
-          else if (name === "href" && el.localName === "a") {
-            // 下面统一处理链接
+          else if (name === "srcset" || name === "imagesrcset" || name === "xlink:href") {
+            // xlink:href 只给 SVG a 单独处理，普通元素一律移除
+            if (!(name === "xlink:href" && (el.localName === "a" || el.localName === "image"))) el.removeAttribute(attr.name);
           }
         }
       }
-      for (const el of Array.from(body.querySelectorAll("a[href]"))) {
-        const raw = el.getAttribute("href");
+      const linkElements = Array.from(body.querySelectorAll("a"));
+      for (const el of linkElements) {
+        let raw = el.getAttribute("href") || "";
+        if (!raw) { try { raw = el.getAttributeNS("http://www.w3.org/1999/xlink", "href") || ""; } catch { } }
+        if (!raw) raw = el.getAttribute("xlink:href") || "";
         const ref = this.resolveReference(sec.path, raw);
         el.removeAttribute("href");
+        el.removeAttribute("xlink:href");
         if (ref.kind === "internal") {
-          el.setAttribute("data-lyra-target", ref.kind);
+          el.setAttribute("data-lyra-target", "internal");
           el.setAttribute("data-lyra-path", ref.path);
           el.setAttribute("data-lyra-frag", ref.fragment || "");
           el.setAttribute("role", "link");
@@ -506,9 +595,15 @@
         if (!raw) return;
         if (/^data:|^blob:/i.test(raw)) return;
         const ref = this.resolveReference(sec.path, raw);
-        if (ref.kind === "external") { el.removeAttribute(attr); return; }
-        if (ref.kind !== "resource") return;
-        const url = await this._resourceUrl(ref.path);
+        if (ref.kind !== "resource") {
+          el.removeAttribute(attr);
+          if (ref.kind === "invalid") {
+            el.setAttribute("data-lyra-missing-resource", "invalid-path");
+            if (el.localName === "img") { el.setAttribute("alt", "资源路径越界"); el.classList.add("lyra-missing-image"); }
+          }
+          return;
+        }
+        const url = await this._resourceUrl(ref.path, ref.fragment || "");
         if (url) {
           el.setAttribute(attr, url);
           resources.push(ref.path);
@@ -549,8 +644,12 @@
       const text = await this.readText(sec.path);
       if (!text) return "";
       const doc = new DOMParser().parseFromString(text, "text/html");
-      for (const el of Array.from(doc.querySelectorAll("script,style,noscript"))) el.remove();
-      return stripHtmlToText(doc);
+      const body = doc.body || doc.documentElement;
+      if (!body) return "";
+      const blocked = "script,style,link,meta,base,title,iframe,frame,frameset,object,embed,applet,form,input,button,select,textarea,audio,video,source,track,param";
+      for (const el of Array.from(body.querySelectorAll(blocked))) el.remove();
+      // ★ 和渲染 iframe 共用同一文字模型（块级换行、文本节点顺序一致）
+      return buildTextModel(body).text;
     }
 
     async _computeBookId() {
@@ -567,8 +666,10 @@
     }
 
     releaseResources() {
+      this._destroyed = true;
       for (const { url } of this._resources.values()) { try { URL.revokeObjectURL(url); } catch { } }
       this._resources.clear();
+      this._resourcePending.clear();
     }
 
     /** 只释放不再属于当前章节/当前书的资源；旧异步任务不能撤销当前章节正在用的 URL。 */
@@ -590,5 +691,5 @@
     }
   }
 
-  global.LyraEpubBook = { EpubBook, BookError, splitReference, normalizeSegments, dirOf, decodeSafe };
+  global.LyraEpubBook = { EpubBook, BookError, splitReference, normalizeSegments, dirOf, decodeSafe, buildTextModel };
 })(window);

@@ -44,12 +44,18 @@
     restored: false,
     modified: false,
     bookGeneration: 0,
+    openIntent: 0,
+    searchBookId: "",
     navGeneration: 0,
     turnQueue: [],
     turnBusy: false,
     interactionToken: 0,
     saveTimer: 0,
     prefsSaveTimer: 0,
+    interactionPromise: null,
+    pendingPrefsPatch: {},
+    prefsSaveGeneration: 0,
+    saveFailed: false,
     pageIndex: 0,
     pageCount: 0,
     lastOpen: null,
@@ -167,7 +173,15 @@
     // 字号/行距/宽度/侧栏修改前先抓住当前最前可见文字，避免样式先重排后锚点已经漂移
     let pendingAnchor = null;
     try { if (paginator && paginator.doc) pendingAnchor = paginator.captureAnchor(); } catch { }
+    const before = state.prefs;
     state.prefs = normalizePrefs({ ...state.prefs, ...(next || {}) });
+    const patch = {};
+    if (opts.save !== false) {
+      for (const key of ["fontSize", "lineHeight", "contentWidth", "theme", "bg", "fg", "selectable", "reduceMotion", "sidebar"]) {
+        if (JSON.stringify(before[key]) !== JSON.stringify(state.prefs[key])) patch[key] = state.prefs[key];
+      }
+      if (Object.keys(patch).length) Object.assign(state.pendingPrefsPatch, patch);
+    }
     const p = state.prefs;
     applyOuterTheme();
     syncFrameSize();
@@ -200,26 +214,50 @@
     if (opts.save !== false) schedulePrefsSave();
   }
 
+  async function flushPrefs() {
+    const patch = state.pendingPrefsPatch;
+    if (!patch || !Object.keys(patch).length) return true;
+    const gen = ++state.prefsSaveGeneration;
+    try {
+      await state.client.savePreferences(patch);
+      // 只有本次提交的字段仍是当前待提交内容时才清空，避免清掉期间新改的字段
+      if (gen === state.prefsSaveGeneration) {
+        for (const k of Object.keys(patch)) {
+          if (JSON.stringify(state.pendingPrefsPatch[k]) === JSON.stringify(patch[k])) delete state.pendingPrefsPatch[k];
+        }
+      }
+      setSaveState(state.client.isPersistent ? "设置已保存" : "设置已保存在当前窗口");
+      return true;
+    } catch (e) {
+      setSaveState("设置未保存，可重试");
+      setStatus("阅读设置保存失败：" + (e && e.message || e), true);
+      return false;
+    }
+  }
+
   function schedulePrefsSave() {
     clearTimeout(state.prefsSaveTimer);
-    state.prefsSaveTimer = setTimeout(async () => {
-      try {
-        await state.client.savePreferences(state.prefs);
-        setSaveState("设置已保存");
-      } catch {
-        setSaveState("设置仅保存在本窗口");
-      }
-    }, 300);
+    state.prefsSaveTimer = setTimeout(() => { state.prefsSaveTimer = 0; flushPrefs(); }, 300);
   }
 
   /* ---------------- 交互资格与位置保存 ---------------- */
-  async function markInteraction() {
+  function markInteraction() {
     if (!state.book) return 0;
     state.modified = true;
     if (state.client.isPersistent) {
-      try { state.interactionToken = await state.client.interact(state.book.bookId); } catch { }
+      // 每次真实用户操作申请新的交互资格；定时保存只 await 这个结果，不会重新申请
+      const bookId = state.book.bookId;
+      state.interactionPromise = (async () => {
+        try {
+          const token = await state.client.interact(bookId);
+          if (state.book && state.book.bookId === bookId && token) state.interactionToken = token;
+          return token;
+        } catch { return state.interactionToken || 0; }
+      })();
+      return state.interactionPromise;
     }
-    return state.interactionToken;
+    state.interactionPromise = Promise.resolve(0);
+    return state.interactionPromise;
   }
 
   function capturePosition() {
@@ -242,17 +280,43 @@
   }
 
   async function flushSave() {
-    if (!state.book || !state.ready || !state.modified) return;
-    const pos = capturePosition();
-    if (!pos) return;
+    if (!state.book || !state.ready || !state.modified) return false;
+    try { paginator.settleForSnapshot(); } catch { }
+    // ★ 快照冻结：等待交互资格/写入期间即使换书，也不会把坐标写到新书上
+    const snapshot = {
+      bookId: state.book.bookId,
+      pos: capturePosition(),
+      seqBook: state.book,
+      wasPersistent: state.client.isPersistent,
+    };
+    if (!snapshot.pos) return false;
+    const tokenPromise = state.interactionPromise;
+    if (tokenPromise) { try { await tokenPromise; } catch { } }
+    if (state.client.isPersistent && !state.interactionToken) {
+      setSaveState("等待用户操作后再保存");
+      return false;
+    }
     try {
-      if (state.client.isPersistent) await markInteraction();
       setSaveState("正在保存…");
-      await state.client.savePosition(state.book.bookId, pos, state.interactionToken);
-      setSaveState("已保存阅读位置");
+      await state.client.savePosition(snapshot.bookId, snapshot.pos, state.interactionToken);
+      if (state.bookId === snapshot.bookId) {
+        state.saveFailed = false;
+        setSaveState(state.client.isPersistent ? "已保存阅读位置" : "位置已保存在当前窗口");
+        // 只有在保存期间没有新的翻页/换书时才能清 modified
+        if (state.book === snapshot.seqBook && capturePosition()?.locator?.textOffset === snapshot.pos.locator?.textOffset) state.modified = false;
+      }
+      return true;
     } catch (e) {
-      setSaveState("位置未保存");
-      if (e && e.code === "STALE_INTERACTION") setStatus("另一个窗口已更新阅读位置，本窗口的迟到位置未保存");
+      if (state.bookId === snapshot.bookId) {
+        state.saveFailed = true;
+        setSaveState("位置未保存，稍后重试");
+      }
+      if (e && (e.code === "STALE_INTERACTION" || e.code === "TOKEN_OWNER_MISMATCH" || e.code === "STALE_SEQUENCE")) {
+        setStatus("另一个窗口已更新阅读位置，本窗口的迟到位置未保存");
+      } else if (e && e.code) {
+        setStatus("保存阅读位置失败：" + (e.message || e.code), true);
+      }
+      return false;
     }
   }
 
@@ -268,8 +332,16 @@
     }
     empty.style.display = "none";
     for (const node of state.book.tocFlat) {
-      const b = document.createElement("button");
       const depth = node.depth || 0;
+      if (node.group || !node.path) {
+        const g = document.createElement("div");
+        g.className = "toc-item toc-group";
+        g.style.paddingLeft = (8 + depth * 16) + "px";
+        g.textContent = (node.children && node.children.length ? "▾ " : "") + (node.title || "分组");
+        box.appendChild(g);
+        continue;
+      }
+      const b = document.createElement("button");
       b.className = "toc-item";
       b.dataset.path = node.path;
       b.dataset.frag = node.fragment || "";
@@ -307,17 +379,34 @@
   /* ---------------- 书签 ---------------- */
   async function loadBookmarks() {
     if (!state.book) return;
+    const bookId = state.book.bookId;
+    const intent = state.openIntent;
     state.bookmarks = [];
     let cursor = null;
+    const seenIds = new Set();
+    const seenCursors = new Set();
     try {
-      for (let page = 0; page < 12; page++) {
-        const res = await state.client.listBookmarks(state.book.bookId, cursor, 50);
-        const list = res.bookmarks || [];
-        state.bookmarks.push(...list);
-        if (!res.nextCursor) break;
+      for (let page = 0; page < 100; page++) {
+        const res = await state.client.listBookmarks(bookId, cursor, 50);
+        if (bookId !== state.bookId || intent !== state.openIntent) return;
+        for (const bm of res.bookmarks || []) {
+          if (!bm || !bm.id || seenIds.has(bm.id)) continue;
+          seenIds.add(bm.id);
+          state.bookmarks.push(bm);
+        }
+        const total = Number(res.total) || 0;
+        if (!res.nextCursor || (total && state.bookmarks.length >= total)) break;
+        if (res.nextCursor === cursor || seenCursors.has(res.nextCursor)) {
+          setStatus("书签分页游标异常，已停止读取", true);
+          break;
+        }
+        seenCursors.add(res.nextCursor);
         cursor = res.nextCursor;
       }
-    } catch { }
+    } catch (e) {
+      setStatus("读取书签失败：" + (e && e.message || e), true);
+    }
+    if (bookId !== state.bookId || intent !== state.openIntent) return;
     renderBookmarks();
   }
 
@@ -375,7 +464,7 @@
     if (!anchor) { setStatus("当前页没有可定位的内容", true); return; }
     const sec = state.book.spine[state.spineIndex];
     const chapterTitle = state.book.sectionTitleSync(state.spineIndex);
-    const key = (sec ? sec.path : "") + "|" + JSON.stringify(anchor.textNodePath || anchor.elementPath) + "|" + (anchor.offsetUtf16 || 0);
+    const key = (sec ? sec.path : "") + "|" + (anchor.textOffset != null ? "t" + anchor.textOffset : "e" + JSON.stringify(anchor.elementPath));
     const exists = state.bookmarks.find((b) => b._key === key);
     if (exists) { setStatus("当前位置已经有书签了"); showSidebarTab("bookmarks"); return; }
     const id = "bm-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
@@ -430,6 +519,7 @@
     $("searchPanel").classList.remove("open");
     state.searchOpen = false;
     state.searchGen++;
+    if (searchEngine) { try { searchEngine.cancel(); } catch { } }
     if (paginator) paginator.clearHighlights();
   }
 
@@ -460,29 +550,36 @@
   async function runSearch() {
     const q = $("searchInput").value.trim();
     if (!state.book) return;
+    const bookId = state.book.bookId;
     const gen = ++state.searchGen;
     if (!q) { renderSearchResults({ results: [], total: 0 }); return; }
-    if (!searchEngine) searchEngine = new searchModule.SearchEngine(state.book, {
-      onProgress: (p) => {
-        if (gen !== state.searchGen) return;
-        $("searchInfo").textContent = `正在建立索引… ${p.done}/${p.total}${p.truncated ? "（已达缓存上限）" : ""}`;
-      },
-    });
+    if (!searchEngine || state.searchBookId !== bookId) {
+      if (searchEngine) { try { searchEngine.cancel(); } catch { } }
+      searchEngine = new searchModule.SearchEngine(state.book, {
+        onProgress: (p) => {
+          if (gen !== state.searchGen || bookId !== state.bookId) return;
+          $("searchInfo").textContent = `正在建立索引… ${p.done}/${p.total}${p.truncated ? "（已达缓存上限）" : ""}`;
+        },
+      });
+      state.searchBookId = bookId;
+    }
     try {
       $("searchInfo").textContent = "正在查找…";
       const res = await searchEngine.search(q);
-      if (gen !== state.searchGen) return;
+      if (gen !== state.searchGen || bookId !== state.bookId) return;
       renderSearchResults(res);
     } catch (e) {
-      if (gen !== state.searchGen) return;
+      if (gen !== state.searchGen || bookId !== state.bookId) return;
       $("searchInfo").textContent = e.message === "搜索已取消" ? "已取消" : ("查找失败：" + (e.message || e));
     }
   }
 
   async function gotoSearchResult(result) {
     if (!result || !state.book) return;
+    const bookId = state.book.bookId;
     clearTurnQueue();
     await navigateToSpine(result.spineIndex, { save: true, reason: "search", searchResult: result });
+    if (bookId !== state.bookId) return;
     setStatus("查找结果：" + (result.snippet || result.quote || ""));
   }
 
@@ -536,6 +633,12 @@
     state.turnQueue.push(dir > 0 ? 1 : -1);
     if (state.turnQueue.length > 200) state.turnQueue.splice(0, state.turnQueue.length - 200);
     processTurns();
+  }
+
+  function firstReadableSpineIndex() {
+    if (!state.book) return 0;
+    for (let i = 0; i < state.book.spine.length; i++) if (state.book.spine[i].linear !== false) return i;
+    return 0;
   }
 
   function nextReadableSpineIndex(from, dir) {
@@ -656,12 +759,16 @@
     try {
       const prepared = await state.book.prepareSection(index);
       if (gen !== state.navGeneration) return false;
-      paginator.setReduceMotion(state.prefs.reduceMotion);
-      paginator.setSelectionMode(state.prefs.selectable);
       await paginator.setSection(prepared, {
         anchor: opts.anchor || null,
         page: Number.isFinite(opts.page) ? opts.page : null,
         fraction: Number.isFinite(opts.fraction) ? opts.fraction : null,
+        style: {
+          bg: state.prefs.bg, fg: state.prefs.fg, fontSize: state.prefs.fontSize,
+          lineHeight: state.prefs.lineHeight, contentWidth: state.prefs.contentWidth,
+        },
+        selectable: state.prefs.selectable,
+        reduceMotion: state.prefs.reduceMotion,
       });
       if (gen !== state.navGeneration) return false;
       state.spineIndex = index;
@@ -672,11 +779,6 @@
       state.busy = false;
       hideLoading();
       hideError();
-      paginator.applyStyle({
-        bg: state.prefs.bg, fg: state.prefs.fg, fontSize: state.prefs.fontSize,
-        lineHeight: state.prefs.lineHeight, contentWidth: state.prefs.contentWidth,
-      });
-      paginator.setSelectionMode(state.prefs.selectable);
       try { state.book.releaseResourcesExcept(prepared.resources); } catch { }
       if (opts.page === "last") {
         paginator.goToPage(paginator.pageCount - 1, { animate: false, notify: true });
@@ -719,7 +821,11 @@
 
   async function applySearchResult(result) {
     if (!paginator || !paginator.doc) return;
-    const range = searchModule.SearchEngine.rangeForResult(paginator.doc, paginator.content, result);
+    // 搜索与分页共用同一文字模型：用 offset/length 重建范围，重复词也能定位正确位置
+    let range = Number.isFinite(result.offset)
+      ? paginator.rangeAtTextOffset(result.offset, result.length || 0)
+      : null;
+    if (!range) range = searchModule.SearchEngine.rangeForResult(paginator.doc, paginator.content, result);
     if (!range) { setStatus("找到了文字，但当前排版无法精确定位", true); return; }
     const page = paginator.pageForRange(range);
     paginator.goToPage(page, { animate: false, notify: true });
@@ -730,11 +836,28 @@
 
   /* ---------------- 打开/关闭书 ---------------- */
   async function openBookBuffer(buffer, fileName, opts = {}) {
+    const intent = Number.isFinite(opts.intent) ? opts.intent : ++state.openIntent;
+    if (intent !== state.openIntent) return false;
+    // F07：换书前把原书有效待保存位置/设置提交完，避免防抖窗口内丢失
+    if (state.book && state.ready) {
+      if (state.modified) { try { await flushSave(); } catch { } }
+      clearTimeout(state.saveTimer); state.saveTimer = 0;
+      clearTimeout(state.prefsSaveTimer); state.prefsSaveTimer = 0;
+      try { await flushPrefs(); } catch { } 
+    }
+    if (intent !== state.openIntent) return false;
     const gen = ++state.bookGeneration;
+    const stale = () => intent !== state.openIntent || gen !== state.bookGeneration;
     const oldBook = state.book;
     const oldBookId = state.bookId;
+    const oldFileName = state.fileName;
+    const oldLoadId = state.loadId;
     const oldSpine = state.spineIndex;
     const oldPrepared = state.prepared;
+    const oldPageIndex = state.pageIndex;
+    const oldPageCount = state.pageCount;
+    const oldPrefs = { ...state.prefs };
+    const oldBookmarks = state.bookmarks.slice();
     state.ready = false;
     state.busy = true;
     state.modified = false;
@@ -746,9 +869,9 @@
     hideError();
     try {
       const book = await bookModule.EpubBook.open(buffer, fileName);
-      if (gen !== state.bookGeneration) { book.destroy(); return; }
+      if (stale()) { book.destroy(); return false; }
       const loaded = await state.client.load(book.bookId);
-      if (gen !== state.bookGeneration) { book.destroy(); return; }
+      if (stale()) { book.destroy(); return false; }
 
       const legacy = state.client.migrateLegacy(fileName + ":" + buffer.byteLength);
       const prefs = normalizePrefs({ ...(legacy.preferences || {}), ...(loaded.preferences || {}) });
@@ -756,6 +879,9 @@
       state.bookId = book.bookId;
       state.fileName = fileName;
       state.loadId = opts.loadId || state.loadId || book.bookId;
+      if (searchEngine) { try { searchEngine.cancel(); } catch { } searchEngine = null; }
+      state.searchGen++;
+      closeSearch();
       state.prefs = prefs;
       applyPreferences(prefs, { save: false, relayout: false });
       state.bookmarks = [];
@@ -764,7 +890,7 @@
       loadBookmarks();
 
       // 恢复位置：优先新的文字锚点；旧版只有章节索引时只做章节级迁移
-      let startIndex = 0, anchor = null, fraction = null;
+      let startIndex = firstReadableSpineIndex(), anchor = null, fraction = null;
       const pos = loaded.position;
       if (pos && (pos.spineHref || Number.isFinite(pos.spineIndex))) {
         const byHref = pos.spineHref ? book.findSpineIndexByPath(pos.spineHref) : -1;
@@ -777,10 +903,8 @@
       }
 
       const ok = await navigateToSpine(startIndex, { anchor, fraction, save: false, restore: true });
-      if (!ok || gen !== state.bookGeneration) {
-        if (gen === state.bookGeneration) throw new Error("正文载入失败");
-        return;
-      }
+      if (stale()) return false;
+      if (!ok) throw new Error("正文载入失败");
       state.ready = true;
       state.busy = false;
       state.restored = true;
@@ -796,22 +920,43 @@
       updatePageUi();
       return true;
     } catch (e) {
-      if (gen !== state.bookGeneration) return false;
-      // 打开失败：如果原来有可读书，保留原书界面；否则显示可恢复错误
+      if (stale()) return false;
+      // 打开失败：恢复旧书完整的可见状态与书签/设置，不清空旧阅读界面
       if (oldBook) {
         state.book = oldBook;
         state.bookId = oldBookId;
+        state.fileName = oldFileName;
+        state.loadId = oldLoadId;
         state.spineIndex = oldSpine;
         state.prepared = oldPrepared;
+        state.pageIndex = oldPageIndex;
+        state.pageCount = oldPageCount;
+        state.prefs = oldPrefs;
+        state.bookmarks = oldBookmarks;
         state.ready = !!(paginator && paginator.doc);
+        applyPreferences(oldPrefs, { save: false, relayout: false });
+        buildTocList();
+        renderBookmarks();
+        loadBookmarks();
+        if (state.ready) {
+          hideError(); hideLoading(); updatePageUi();
+          setStatus("打开新书失败，已保留原来的书");
+          // 通知宿主：新 load 失败后旧书仍然可用，撤掉错误遮罩而不是把旧界面盖住
+          try { state.client.bookBegin(oldLoadId, { name: oldFileName, size: 0 }); state.client.bookReady(oldLoadId); } catch { }
+        }
       } else {
         state.book = null;
         state.ready = false;
       }
-      showError("打开 EPUB 失败：" + (e.message || e), () => {
-        if (state.lastOpen) openBookBuffer(state.lastOpen.buffer, state.lastOpen.fileName, { ...state.lastOpen, loadId: "load-" + Date.now().toString(36) });
-      });
-      state.client.bookError(state.loadId, e.message || "打开失败", e.code || "OPEN_ERROR");
+      if (oldBook && state.ready) {
+        // 旧书正文仍在屏上：只提示，不盖住旧阅读界面
+        setStatus("打开新书失败，已保留原来的书：" + (e.message || e), true);
+      } else {
+        showError("打开 EPUB 失败：" + (e.message || e), () => {
+          if (state.lastOpen) openBookBuffer(state.lastOpen.buffer, state.lastOpen.fileName, { ...state.lastOpen, loadId: "load-" + Date.now().toString(36) });
+        });
+      }
+      if (!oldBook || !state.ready) state.client.bookError(state.loadId, e.message || "打开失败", e.code || "OPEN_ERROR");
       return false;
     } finally {
       if (gen === state.bookGeneration) state.busy = false;
@@ -820,20 +965,25 @@
 
   async function openFile(file, opts = {}) {
     if (!file) return;
+    const intent = ++state.openIntent;   // 在读取文件字节之前就确定这次打开意图
     const name = file.name || "book.epub";
     if (!/\.epub$/i.test(name) && file.type !== "application/epub+zip") {
       setStatus("请选择一个 .epub 文件", true);
       return;
     }
-    const buf = await file.arrayBuffer();
+    let buf;
+    try { buf = await file.arrayBuffer(); }
+    catch (e) { if (intent === state.openIntent) showError("读取 EPUB 失败：" + (e.message || e), null); return; }
+    if (intent !== state.openIntent) return;   // 读取期间用户已选了更新的文件
     const loadId = opts.loadId || ("load-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6));
     state.client.bookBegin(loadId, { name, size: buf.byteLength });
-    await openBookBuffer(buf, name, { ...opts, loadId, manual: true });
+    await openBookBuffer(buf, name, { ...opts, loadId, manual: true, intent });
   }
 
   async function openFromUrl() {
     const q = new URLSearchParams(location.search);
     const rel = q.get("book");
+    const intent = ++state.openIntent;
     state.sessionId = q.get("sessionId") || state.sessionId;
     state.loadId = q.get("loadId") || state.loadId;
     if (!rel) {
@@ -843,17 +993,21 @@
     }
     state.urlBookRequested = true;
     const nameParam = q.get("name");
-    let name = nameParam ? decodeURIComponent(nameParam) : decodeURIComponent(rel.split("/").pop() || "book.epub");
+    // URLSearchParams 已经解码；不能再 decode 一次，否则显式文件名含 % 时会 URI malformed
+    let name = nameParam || (rel.split("/").pop() || "book.epub");
     showPageFrame();
     showLoading("正在打开书库 EPUB…");
     try {
       const resp = await fetch(rel, { cache: "no-store" });
       if (!resp.ok) throw new Error("HTTP " + resp.status);
       const buf = await resp.arrayBuffer();
-      await openBookBuffer(buf, name, { loadId: state.loadId, manual: false });
+      if (intent !== state.openIntent) return;
+      await openBookBuffer(buf, name, { loadId: state.loadId, manual: false, intent });
     } catch (e) {
-      showError("打开书库 EPUB 失败：" + (e.message || e), () => location.reload());
-      state.client.bookError(state.loadId, e.message || "打开失败", "FETCH_ERROR");
+      if (intent === state.openIntent) {
+        showError("打开书库 EPUB 失败：" + (e.message || e), () => location.reload());
+        state.client.bookError(state.loadId, e.message || "打开失败", "FETCH_ERROR");
+      }
     }
   }
 
@@ -996,12 +1150,6 @@
       onPageChange: pageChanged,
       onContentReady: (doc) => {
         bindContentInteraction(doc);
-        paginator.applyStyle({
-          bg: state.prefs.bg, fg: state.prefs.fg, fontSize: state.prefs.fontSize,
-          lineHeight: state.prefs.lineHeight, contentWidth: state.prefs.contentWidth,
-        });
-        paginator.setSelectionMode(state.prefs.selectable);
-        paginator.setReduceMotion(state.prefs.reduceMotion);
       },
       onLink: handleLink,
       onKey: (ev) => {
@@ -1025,6 +1173,7 @@
       loadId: state.loadId,
       onStatus: (text) => setStatus(text, false),
     });
+    state.sessionId = state.client.sessionId;
     createPaginator();
     bindFileUi();
     bindPageUi();
@@ -1035,7 +1184,6 @@
     $("sidebarBtn").addEventListener("click", () => applyPreferences({ sidebar: $("sidebar").classList.contains("collapsed") }, { save: true }));
     document.querySelectorAll(".side-tabs button").forEach((b) => b.addEventListener("click", () => showSidebarTab(b.dataset.tab)));
     $("addBookmarkBtn").addEventListener("click", addBookmark);
-    $("settingsBtn").addEventListener("click", () => $("settingsPanel").classList.toggle("open"));
     $("errorRetry").addEventListener("click", () => {
       const fn = state.retryAction || state.lastOpen && (() => openBookBuffer(state.lastOpen.buffer, state.lastOpen.fileName, { ...state.lastOpen, loadId: "load-" + Date.now().toString(36) }));
       if (fn) fn();
@@ -1061,7 +1209,10 @@
     await openFromUrl();
   }
 
-  window.__lyraDebug = { state, get paginator() { return paginator; } };
+  // 候选/测试专用入口：默认不暴露可变内部状态；浏览器回归通过注入 __LYRA_TEST_MODE__ 开启
+  if (window.__LYRA_TEST_MODE__ === true) {
+    window.__lyraDebug = { state, get paginator() { return paginator; } };
+  }
   init().catch((e) => {
     showError("阅读器初始化失败：" + (e.message || e), () => location.reload());
     try { state.client && state.client.bookError(state.loadId, e.message || "初始化失败", "INIT_ERROR"); } catch { }

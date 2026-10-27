@@ -1,4 +1,4 @@
-/* 分页器：章节正文放进禁脚本 iframe，按实际内容盒尺寸做横向分页。
+﻿/* 分页器：章节正文放进禁脚本 iframe，按实际内容盒尺寸做横向分页。
  * 负责文字位置捕获/恢复、尺寸重排、时间驱动且一定能停下来的翻页动画。
  */
 (function (global) {
@@ -139,6 +139,9 @@
       this._reduceMotion = false;
       this._lastProgressAt = 0;
       this._lastProgressValue = 0;
+      this._sectionToken = 0;
+      this._appliedStyle = {};
+      this._confirmedAnchor = null;
       this._lateImages = [];
       this._imageRelayoutTimer = 0;
       this._onResize = () => this.requestLayout({ keepAnchor: true });
@@ -148,6 +151,7 @@
     setReduceMotion(on) { this._reduceMotion = !!on; }
 
     setSelectionMode(on) {
+      this._selectionMode = !!on;
       if (!this.doc) return;
       try { this.doc.documentElement.classList.toggle("allow-select", !!on); } catch { }
     }
@@ -174,6 +178,7 @@
 
     destroy() {
       this._destroyed = true;
+      this._sectionToken++;
       this.cancelAnimation();
       window.removeEventListener("resize", this._onResize);
       if (this.frame) { try { this.frame.srcdoc = ""; } catch { } }
@@ -207,7 +212,7 @@
 
     async setSection(prepared, options = {}) {
       this.cancelAnimation();
-      this._destroyed = false;
+      const token = ++this._sectionToken;
       this._activePrepared = prepared;
       this.sectionIndex = prepared.index;
       this.sectionPath = prepared.path;
@@ -216,6 +221,8 @@
       this.ready = false;
       this.doc = null;
       this.content = null;
+      this._confirmedAnchor = null;
+      this._appliedStyle = options.style || this._appliedStyle || {};
       const frame = this.frame;
       if (!frame) throw new Error("分页器没有 iframe");
       frame.removeAttribute("src");
@@ -229,20 +236,27 @@
         frame.srcdoc = this._inputDoc(prepared);
         setTimeout(finish, 4000);
       });
-      if (this._destroyed) return;
+      if (token !== this._sectionToken || this._destroyed) return;
       this.doc = frame.contentDocument;
       this.content = this.doc && this.doc.getElementById("lyra-content");
       if (!this.content) throw new Error("章节 iframe 内容没有创建");
+      // ★ 先应用最终阅读设置，再等待字体/资源，最后才做唯一一次最终分页与锚点恢复
+      this.applyStyle(this._appliedStyle);
+      this.setSelectionMode(options.selectable !== undefined ? options.selectable : this._selectionMode);
+      this.setReduceMotion(options.reduceMotion !== undefined ? options.reduceMotion : this._reduceMotion);
       this._bindContentEvents();
       await this._waitForResources();
-      if (this._destroyed) return;
+      if (token !== this._sectionToken || this._destroyed) return;
       this.layout({ resetPage: true });
+      if (token !== this._sectionToken || this._destroyed) return;
       this.ready = true;
       let target = 0;
       if (options.anchor) target = this.locateAnchor(options.anchor);
       else if (Number.isFinite(options.page)) target = options.page;
       else if (Number.isFinite(options.fraction)) target = Math.round(options.fraction * Math.max(0, this.pageCount - 1));
+      if (options.page === "last") target = this.pageCount - 1;
       this.goToPage(target, { animate: false, notify: true });
+      this._rememberAnchor();
       this.onContentReady(this.doc);
     }
 
@@ -271,7 +285,9 @@
       if (this._imageRelayoutTimer) clearTimeout(this._imageRelayoutTimer);
       this._imageRelayoutTimer = setTimeout(() => {
         this._imageRelayoutTimer = 0;
-        this.requestLayout({ keepAnchor: true });
+        // ★ 使用图片打乱之前确认过的可见锚点，而不是调度时的当前位置
+        const anchor = this._confirmedAnchor || this.captureAnchor();
+        this.requestLayout({ anchor });
       }, 120);
     }
 
@@ -348,12 +364,76 @@
       });
     }
 
+    invalidateTextModel() { this._textModel = null; }
+
+    getTextModel() {
+      if (!this._textModel) {
+        if (!this.content) return { text: "", segments: [] };
+        const mod = global.LyraEpubBook;
+        this._textModel = mod && typeof mod.buildTextModel === "function"
+          ? mod.buildTextModel(this.content)
+          : { text: this.content.textContent || "", segments: [] };
+      }
+      return this._textModel;
+    }
+
+    offsetForNode(node, localOffset) {
+      const model = this.getTextModel();
+      for (const seg of model.segments) {
+        if (seg.node === node) return seg.start + clamp(Number(localOffset) || 0, 0, seg.end - seg.start);
+      }
+      return null;
+    }
+
+    rangeAtTextOffset(offset, length = 0) {
+      if (!this.doc || !this.content) return null;
+      const model = this.getTextModel();
+      const text = model.text;
+      const posOf = (want) => {
+        want = clamp(Number(want) || 0, 0, text.length);
+        for (const seg of model.segments) {
+          if (want <= seg.end) return { node: seg.node, offset: clamp(want - seg.start, 0, seg.end - seg.start) };
+        }
+        const last = model.segments[model.segments.length - 1];
+        return last ? { node: last.node, offset: last.end - last.start } : null;
+      };
+      const a = posOf(offset);
+      const b = posOf((Number(offset) || 0) + Math.max(0, Number(length) || 0));
+      if (!a || !b) return null;
+      const r = this.doc.createRange();
+      try {
+        r.setStart(a.node, a.offset);
+        r.setEnd(b.node, b.offset);
+      } catch { return null; }
+      return r;
+    }
+
+    _pageForOffset(offset) {
+      const r = this.rangeAtTextOffset(offset, 0);
+      if (!r) return null;
+      return this.pageForRange(r);
+    }
+
+    _findQuoteCandidates(quote) {
+      const model = this.getTextModel();
+      const parts = normalizeText(quote).split(" ").filter(Boolean);
+      if (!parts.length) return [];
+      const re = new RegExp(parts.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+"), "gi");
+      const out = [];
+      let m;
+      while ((m = re.exec(model.text)) !== null) {
+        out.push(m.index);
+        if (out.length > 80) break;
+        if (m[0].length === 0) re.lastIndex++;
+      }
+      return out;
+    }
+
     captureAnchor() {
       if (!this.doc || !this.content || !this.ready) return null;
       const doc = this.doc;
       const W = this.pageW;
       const H = this.pageH;
-      const scroll = this.scrollPos;
       let range = null;
       // 从当前页顶部附近找第一个可命中的文字光标
       for (let y = 2; y < H; y += 5) {
@@ -363,17 +443,20 @@
             (doc.caretPositionFromPoint ? (() => { const p = doc.caretPositionFromPoint(x, y); if (!p) return null; const r = doc.createRange(); r.setStart(p.offsetNode, p.offset); r.collapse(true); return r; })() : null);
         } catch { range = null; }
         if (range && range.startContainer && range.startContainer.nodeType === Node.TEXT_NODE && this.content.contains(range.startContainer)) {
-          const node = range.startContainer;
-          if (node.data && node.data.trim()) break;
+          if (range.startContainer.data && range.startContainer.data.trim()) break;
         }
         range = null;
       }
-      let node = null, offset = 0, elementPathValue = null;
+      let node = null, localOffset = 0, elementPathValue = null;
       if (range && range.startContainer && range.startContainer.nodeType === Node.TEXT_NODE && this.content.contains(range.startContainer)) {
         node = range.startContainer;
-        offset = range.startOffset;
+        localOffset = range.startOffset;
       }
-      if (!node) {
+      let textOffset = null;
+      if (node) {
+        textOffset = this.offsetForNode(node, localOffset);
+      }
+      if (textOffset == null) {
         // 没有文字的可访问页（纯图页）：抓取当前页命中的元素路径
         const x = Math.max(4, W * 0.5);
         let el = null;
@@ -384,13 +467,17 @@
         }
         if (el) elementPathValue = elementPath(this.content, el);
       }
-      const textPath = node ? nodePath(this.content, node) : null;
-      const around = node ? textAround(node, offset) : { quote: "", prefix: "", suffix: "" };
+      const model = this.getTextModel();
+      const text = model.text;
+      const around = textOffset != null ? {
+        quote: normalizeText(text.slice(Math.max(0, textOffset - 32), textOffset + 32)),
+        prefix: normalizeText(text.slice(Math.max(0, textOffset - 32), textOffset)),
+        suffix: normalizeText(text.slice(textOffset, textOffset + 32)),
+      } : { quote: "", prefix: "", suffix: "" };
       const fraction = this.pageCount > 1 ? this.pageIndex / (this.pageCount - 1) : 0;
       return {
         elementPath: elementPathValue,
-        textNodePath: textPath,
-        offsetUtf16: offset,
+        textOffset,
         quote: around.quote,
         prefix: around.prefix,
         suffix: around.suffix,
@@ -404,51 +491,50 @@
       if (!this.doc || !this.content || !anchor) return 0;
       const doc = this.doc;
       const W = this.pageW;
-      const total = Math.max(1, this.pageCount * (W + GAP));
+      const model = this.getTextModel();
       const pageForRect = (rect) => {
         if (!rect) return null;
         const x = rect.left + this.scrollPos;
         return clamp(Math.floor((x + 1) / (W + GAP)), 0, this.pageCount - 1);
       };
-      // 1) 原文节点路径 + 偏移
-      if (Array.isArray(anchor.textNodePath)) {
-        const node = nodeAtPath(this.content, anchor.textNodePath);
-        if (node && node.nodeType === Node.TEXT_NODE) {
-          const r = doc.createRange();
-          r.setStart(node, clamp(Number(anchor.offsetUtf16) || 0, 0, node.data.length));
-          r.collapse(true);
-          const rects = r.getClientRects();
-          const rect = rects && rects.length ? rects[0] : r.getBoundingClientRect();
-          const idx = pageForRect(rect);
-          if (idx != null) return idx;
+      // 1) 稳定文字偏移；若上下文不匹配再按 quote 搜索
+      let offset = Number(anchor.textOffset);
+      let range = null;
+      if (Number.isFinite(offset)) {
+        offset = clamp(offset, 0, model.text.length);
+        const q = normalizeText(anchor.quote || "");
+        const near = normalizeText(model.text.slice(Math.max(0, offset - 32), offset + 32));
+        if (!q || near.includes(q.slice(0, 18)) || q.includes(near.slice(0, 18))) {
+          range = this.rangeAtTextOffset(offset, 0);
         }
       }
-      // 2) 短文本 + 上下文匹配
-      if (anchor.quote) {
-        const q = normalizeText(anchor.quote);
-        const nodes = walkTextNodes(this.content);
-        const candidates = [];
-        for (const node of nodes) {
-          const text = normalizeText(node.data);
-          if (!text || !text.includes(q)) continue;
-          candidates.push(node);
-        }
-        const pick = candidates[0];
-        if (pick) {
-          const r = doc.createRange();
-          const raw = pick.data;
-          const pos = raw.indexOf(anchor.quote);
-          r.setStart(pick, pos >= 0 ? pos : 0);
-          r.collapse(true);
-          return pageForRect(r.getBoundingClientRect()) || 0;
+      if (!range && anchor.quote) {
+        const candidates = this._findQuoteCandidates(anchor.quote);
+        if (candidates.length) {
+          const want = Number.isFinite(offset) ? offset : 0;
+          candidates.sort((a, b) => Math.abs(a - want) - Math.abs(b - want));
+          const best = candidates.find((idx) => {
+            const before = normalizeText(model.text.slice(Math.max(0, idx - 32), idx));
+            const after = normalizeText(model.text.slice(idx, idx + 32));
+            return (!anchor.prefix || before.endsWith(normalizeText(anchor.prefix))) &&
+              (!anchor.suffix || after.startsWith(normalizeText(anchor.suffix)));
+          });
+          range = this.rangeAtTextOffset(best !== undefined ? best : candidates[0], 0);
+          if (range) offset = best !== undefined ? best : candidates[0];
         }
       }
-      // 3) 纯图页元素路径
+      if (range) {
+        const rects = range.getClientRects();
+        const rect = rects && rects.length ? rects[0] : range.getBoundingClientRect();
+        const idx = pageForRect(rect);
+        if (idx != null) return idx;
+      }
+      // 2) 纯图页元素路径
       if (Array.isArray(anchor.elementPath)) {
         const el = elementAtPath(this.content, anchor.elementPath);
         if (el) return pageForRect(el.getBoundingClientRect()) || 0;
       }
-      // 4) 章节内相对进度
+      // 3) 章节内相对进度
       if (Number.isFinite(anchor.chapterFraction)) {
         return clamp(Math.round(anchor.chapterFraction * (this.pageCount - 1)), 0, this.pageCount - 1);
       }
@@ -497,10 +583,29 @@
       this._anim.raf = requestAnimationFrame(tick);
     }
 
+    /** 换书/关闭前把未完成的翻页动画定格到目标页，保证快照捕获的是用户最后看到的页。 */
+    settleForSnapshot() {
+      if (!this.doc) return;
+      if (this._anim.raf) {
+        try { cancelAnimationFrame(this._anim.raf); } catch { }
+        this._anim.raf = 0;
+        this._anim.token++;
+        this.scrollPos = this.pageIndex * (this.pageW + GAP);
+        try { this.onPageChange(this.pageIndex, this.pageCount, { reason: "snapshot-settle" }); } catch { }
+        this._rememberAnchor();
+        try { if (this.onFinish) this.onFinish(); } catch { }
+      }
+    }
+
     nextPage() { return this.goToPage(this.pageIndex + 1, { animate: true, reason: "next" }); }
     prevPage() { return this.goToPage(this.pageIndex - 1, { animate: true, reason: "prev" }); }
 
-    _finish() { if (this.onFinish) this.onFinish(); }
+    _rememberAnchor() {
+      if (!this.ready && !this.doc) return;
+      try { this._confirmedAnchor = this.captureAnchor(); } catch { this._confirmedAnchor = null; }
+    }
+
+    _finish() { this._rememberAnchor(); if (this.onFinish) this.onFinish(); }
 
     cancelAnimation() {
       if (this._anim.raf) { try { cancelAnimationFrame(this._anim.raf); } catch { } }
@@ -516,24 +621,6 @@
     clearSelection() {
       const sel = this.getSelection();
       if (sel) try { sel.removeAllRanges(); } catch { }
-    }
-
-    /** 在当前章节里按文本偏移创建 Range（搜索/书签定位共用）。 */
-    rangeAtTextOffset(offset) {
-      if (!this.content) return null;
-      const nodes = walkTextNodes(this.content);
-      let left = Math.max(0, Number(offset) || 0);
-      for (const node of nodes) {
-        const len = node.data.length;
-        if (left <= len) {
-          const r = this.doc.createRange();
-          r.setStart(node, left);
-          r.collapse(true);
-          return r;
-        }
-        left -= len;
-      }
-      return null;
     }
 
     pageForRange(range) {
@@ -570,9 +657,11 @@
           } catch { }
         }
       }
+      this.invalidateTextModel();
     }
 
     clearHighlights() {
+      this.invalidateTextModel();
       if (this._marks) {
         for (const m of this._marks) {
           try { m.replaceWith(...m.childNodes); } catch { }
