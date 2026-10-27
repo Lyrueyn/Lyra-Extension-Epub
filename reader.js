@@ -1,4 +1,4 @@
-﻿/* 阅读器主控制器：生命周期、目录/书签/查找、设置、分页交互。 */
+/* 阅读器主控制器：生命周期、目录/书签/查找、设置、分页交互。 */
 (function () {
   "use strict";
 
@@ -915,8 +915,13 @@
       searchEngine = null;
       if (opts.manual) state.client.bookBegin(state.loadId, { name: fileName, size: buffer.byteLength });
       state.client.bookReady(state.loadId);
-      setStatus("已打开：" + book.title);
-      setSaveState("位置将自动保存");
+      if (!state.client.isPersistent) {
+        setSaveState("仅当前窗口保存");
+        setStatus("此主程序版本不支持跨窗口保存；阅读位置仅保存在当前窗口");
+      } else {
+        setStatus("已打开：" + book.title);
+        setSaveState("位置将自动保存");
+      }
       updatePageUi();
       return true;
     } catch (e) {
