@@ -1518,12 +1518,13 @@
     // 新文件意图到来时，旧书仍应是可读 liveView；先恢复被取消导航的旧视图再等待新字节。
     if (state.navPending && state.navPending.oldView && paginator) {
       const pending = state.navPending;
-      try {
-        const ok = await paginator.restoreLiveView(pending.oldView, { isCancelled: () => false, isFinalizing: () => false });
-        if (ok) {
-          restoreNavView(pending.oldView, state.spineIndex, state.prepared, state.pageIndex, state.pageCount);
-        }
-      } catch { }
+      // 不阻塞新文件读取；旧视图恢复只是过渡态，新书提交会以新 liveView 覆盖。
+      Promise.resolve().then(async () => {
+        try {
+          const ok = await paginator.restoreLiveView(pending.oldView, { isCancelled: () => state.book !== pending.book || state.finalizing, isFinalizing: () => state.finalizing });
+          if (ok && state.book === pending.book) restoreNavView(pending.oldView, state.spineIndex, state.prepared, state.pageIndex, state.pageCount);
+        } catch { }
+      });
     }
     const name = file.name || "book.epub";
     if (!/\.epub$/i.test(name) && file.type !== "application/epub+zip") {
@@ -1718,10 +1719,10 @@
     const pendingAtClose = state.navPending;
     if (pendingAtClose && pendingAtClose.oldView && paginator) {
       try {
-        const restored = await paginator.restoreLiveView(pendingAtClose.oldView, {
-          isCancelled: () => false,
-          isFinalizing: () => false,
-        });
+        const restored = await Promise.race([
+          paginator.restoreLiveView(pendingAtClose.oldView, { isCancelled: () => false, isFinalizing: () => false }),
+          new Promise((resolve) => setTimeout(() => resolve(false), 300)),
+        ]);
         if (restored && paginator.ready && paginator.liveView) {
           state.navPending = null;
           state.spineIndex = paginator.liveView.sectionIndex;
