@@ -67,6 +67,9 @@
     saveFlushPromise: null,
     failedSaves: new Map(),
     committedView: null,
+    liveView: null,
+    viewEpoch: 0,
+    frozen: false,
     navPending: null,
     positionOperation: null,
     positionRevisionByBook: new Map(),
@@ -478,8 +481,11 @@
     if (!state.book) return true;
     if (!state.modified && !force) return true;
     try { paginator.settleForSnapshot(); } catch { }
-    // 操作包在意图产生时冻结；这里只取用，不再每次 flush 新造 sequence/operationId。
-    const op = freezePositionOperation() || state.positionOperation;
+    // 操作包在意图产生时冻结；已有失败快照且没有新用户输入时，重试必须沿用原 sequence/operationId。
+    const failedForBook = state.failedSaves.get(state.book.bookId);
+    const op = (failedForBook && Number(failedForBook.opVersion) === Number(state.saveOpVersion))
+      ? failedForBook
+      : (freezePositionOperation() || state.positionOperation);
     if (!op) { setSaveState("没有可保存的阅读位置"); return false; }
     const usingStable = !!op.fromStable;
     const tokenPromise = op.tokenPromise;
@@ -689,6 +695,13 @@
 
   async function addBookmark() {
     if (!state.book || !paginator || !state.ready || state.finalizing) return;
+    const run = addBookmarkOnce();
+    state.pendingMetadata = run;
+    run.finally(() => { if (state.pendingMetadata === run) state.pendingMetadata = null; });
+    return run;
+  }
+
+  async function addBookmarkOnce() {
     const bookId = state.book.bookId, openIntent = state.openIntent;
     const anchor = paginator.captureAnchor();
     if (!anchor) { setStatus("当前页没有可定位的内容", true); return; }
@@ -753,6 +766,7 @@
     clearTimeout(searchInputTimer);
     searchInputTimer = 0;
     state.searchGen++;
+    try { if (paginator) paginator.invalidateLateImageLayout(); } catch { }
     if (searchEngine) { try { searchEngine.cancel(); } catch { } searchEngine = null; }
     state.searchBookId = "";
     if (clearUI) clearSearchResultsUi();
@@ -950,7 +964,7 @@
           state.pageCount = paginator.pageCount;
           state.modified = true;
           updatePageUi();
-          scheduleSave();
+          scheduleSave(60);
           continue;
         }
         const nextChapter = dir > 0 ? nextReadableSpineIndex(state.spineIndex, 1) : nextReadableSpineIndex(state.spineIndex, -1);
@@ -1023,6 +1037,36 @@
   function pageChanged(index, count, meta) {
     state.pageIndex = index;
     state.pageCount = count;
+    // 新页/新章意图必须让旧页的待保存 operation 失效，否则关闭/防抖会提交上一页身份。
+    try {
+      if (!state.navPending && !state.finalizing && state.positionOperation) {
+        const op = state.positionOperation;
+        if (op.pos && (op.pos.spineIndex !== state.spineIndex ||
+            (op.pos.locator && Number(op.pos.locator.pageIndex) !== Number(index)))) {
+          state.positionOperation = null;
+        }
+      }
+    } catch { }
+    if (!state.navPending && !state.finalizing && paginator) {
+      try { paginator.noteLivePage(); } catch { }
+      state.liveView = paginator.captureView ? paginator.captureView() : state.liveView;
+      if (state.liveView) { state.liveView.pageIndex = index; state.liveView.pageCount = count; }
+    }
+    // R7：直接恢复 liveView 时 onPageChange 是“旧视图已可读”的信号，立即恢复 state ready/identity。
+    if (meta && meta.reason === "layout-restore" && paginator && paginator.ready && paginator.liveView) {
+      const lv = paginator.captureView();
+      if (lv) {
+        state.spineIndex = lv.sectionIndex;
+        state.prepared = lv.prepared;
+        state.pageIndex = lv.pageIndex;
+        state.pageCount = lv.pageCount;
+        state.liveView = lv;
+        state.navPending = null;
+        state.ready = true;
+        state.busy = false;
+        try { hideLoading(); } catch { }
+      }
+    }
     updatePageUi();
     if (state.book && paginator && paginator.doc && !state.navPending && !state.finalizing) rememberStablePosition();
     if (state.navPending) return;
@@ -1040,15 +1084,77 @@
     return true;
   }
 
-  function restoreNavView(oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount) {
+  function restoreNavView(live, fallbackSpine, fallbackPrepared, fallbackPage, fallbackCount) {
+    // setSection 内部自动恢复可能已把 paginator.liveView 更新为同一章节的当前页；优先采用它，避免旧快照页码覆盖。
+    try {
+      const pv = paginator && paginator.captureView ? paginator.captureView() : null;
+      if (pv && live && pv.sectionIndex === live.sectionIndex) live = pv;
+    } catch { }
     state.navPending = null;
-    state.spineIndex = oldView && Number.isFinite(oldView.sectionIndex) ? oldView.sectionIndex : oldSpine;
-    state.prepared = oldView && oldView.prepared ? oldView.prepared : oldPrepared;
-    state.pageIndex = oldView && Number.isFinite(oldView.pageIndex) ? oldView.pageIndex : oldPageIndex;
-    state.pageCount = oldView && Number.isFinite(oldView.pageCount) ? oldView.pageCount : oldPageCount;
-    state.committedView = oldView || state.committedView;
-    state.ready = !!(paginator && paginator.ready && state.committedView);
+    state.spineIndex = live && Number.isFinite(live.sectionIndex) ? live.sectionIndex : fallbackSpine;
+    state.prepared = live && live.prepared ? live.prepared : fallbackPrepared;
+    state.pageIndex = live && Number.isFinite(live.pageIndex) ? live.pageIndex : fallbackPage;
+    state.pageCount = live && Number.isFinite(live.pageCount) ? live.pageCount : fallbackCount;
+    state.liveView = live || state.liveView;
+    state.ready = !!(paginator && paginator.ready && state.liveView);
+    try { if (paginator && paginator.noteLivePage) paginator.noteLivePage(); updatePageUi(); updateTocActive(); } catch { }
+  }
+
+  function liveViewNow() {
+    if (state.liveView) return state.liveView;
+    try { return paginator && paginator.captureView ? paginator.captureView() : null; } catch { return null; }
+  }
+
+  function syncStateToPaginatorLive() {
+    if (!paginator || !paginator.ready || !paginator.liveView) return false;
+    const live = paginator.captureView();
+    if (!live) return false;
+    state.navPending = null;
+    state.spineIndex = live.sectionIndex;
+    state.prepared = live.prepared;
+    state.pageIndex = live.pageIndex;
+    state.pageCount = live.pageCount;
+    state.liveView = live;
+    state.ready = true;
+    state.busy = false;
     try { updatePageUi(); updateTocActive(); } catch { }
+    return true;
+  }
+  async function restoreOldViewForPendingOpen(gen, navBook, oldLive, oldSpine, oldPrepared, oldPage, oldCount) {
+    // 打开新书但新书尚未提交：旧书仍应是一份可读 liveView，不能被未完成导航留下 ready=false/候选 DOM。
+    if (!oldLive || !paginator || state.book !== navBook || state.finalizing) return false;
+    try {
+      const ok = await paginator.restoreLiveView(oldLive, {
+        isCancelled: () => state.book !== navBook || state.finalizing,
+        isFinalizing: () => state.finalizing,
+      });
+      if (!ok) return false;
+    } catch { return false; }
+    if (state.book !== navBook || state.finalizing) return false;
+    restoreNavView(oldLive, oldSpine, oldPrepared, oldPage, oldCount);
+    state.busy = false;
+    try { hideLoading(); } catch { }
+    return true;
+  }
+  async function restoreOldViewIfCurrent(gen, oldLive, oldSpine, oldPrepared, oldPage, oldCount) {
+    // epoch 已被更新导航/打开取代时，任何恢复都不得改动当前 DOM/state。
+    if (gen !== state.navGeneration || state.finalizing) return false;
+    let ok = false;
+    try {
+      ok = await paginator.restoreLiveView(oldLive, {
+        isCancelled: () => gen !== state.navGeneration || state.finalizing,
+        isFinalizing: () => state.finalizing,
+      });
+    } catch { ok = false; }
+    if (gen !== state.navGeneration || state.finalizing) return false;
+    if (ok) restoreNavView(oldLive, oldSpine, oldPrepared, oldPage, oldCount);
+    else {
+      state.busy = false;
+      try { hideLoading(); } catch { }
+      try { setStatus("恢复旧视图失败，可重试", true); } catch { }
+      state.ready = !!(paginator && paginator.ready && state.liveView);
+    }
+    return ok;
   }
 
   async function navigateToSpine(index, opts = {}) {
@@ -1057,18 +1163,20 @@
     const navBook = state.book;
     index = clamp(Number(index) || 0, 0, navBook.spine.length - 1);
     const gen = ++state.navGeneration;
-    const oldView = state.committedView ? { ...state.committedView } : (paginator && paginator.captureView ? paginator.captureView() : null);
+    const navOpenIntent = state.openIntent;
+    const isEpochCurrent = () => gen === state.navGeneration && state.book === navBook && state.openIntent === navOpenIntent && !state.finalizing;
+    const oldView = liveViewNow() ? { ...liveViewNow() } : null;
     const oldSpine = state.spineIndex;
     const oldPrepared = state.prepared;
     const oldPageIndex = state.pageIndex;
     const oldPageCount = state.pageCount;
     const previousOwner = state.prepared && state.prepared.book === navBook && state.prepared.owner ? state.prepared.owner : 0;
     let preparedForRelease = null;
-    state.navPending = { gen, oldView, book: navBook };
+    state.navPending = { gen, oldView, book: navBook, epoch: gen };
     state.busy = true;
     state.ready = false;
     state.pendingFrag = opts.fragment || "";
-    if (paginator) { try { paginator.cancelAnimation(); paginator.clearHighlights(); } catch { } }
+    if (paginator) { try { paginator.invalidateLateImageLayout(); paginator.cancelAnimation(); paginator.clearHighlights(); } catch { } }
     showLoading(opts.fromTurn ? "正在切章…" : "正在载入章节…");
     showPageFrame();
     await new Promise((r) => requestAnimationFrame(r));
@@ -1077,8 +1185,16 @@
       preparedForRelease = prepared;
       if (!navStillCurrent(gen, navBook, opts)) {
         try { (prepared.book || navBook).releaseTask(prepared.owner); } catch { }
-        restoreNavView(oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount);
-        state.busy = false;
+        if (state.finalizing) return false; // finalize 由关闭路径处理
+        const openIntentChanged = state.openIntent !== navOpenIntent;
+        if (gen !== state.navGeneration && !(openIntentChanged && state.book === navBook)) return false; // 更新的导航已接管；仅新打开未完成时恢复旧书
+        if (openIntentChanged && gen !== state.navGeneration) {
+          await restoreOldViewForPendingOpen(gen, navBook, oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount);
+        } else if (!(paginator && paginator.ready && paginator.liveView && paginator.liveView.sectionIndex === (oldView && oldView.sectionIndex))) {
+          await restoreOldViewIfCurrent(gen, oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount);
+        } else restoreNavView(oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount);
+        if (gen === state.navGeneration) state.busy = false;
+        if (!syncStateToPaginatorLive() && oldView) { try { await paginator.restoreLiveView(oldView, { isCancelled: () => state.book !== navBook || state.finalizing, isFinalizing: () => state.finalizing }); syncStateToPaginatorLive(); } catch { } }
         try { hideLoading(); } catch { }
         return false;
       }
@@ -1089,6 +1205,7 @@
       }
       const setOk = await paginator.setSection(prepared, {
         isCancelled: () => !navStillCurrent(gen, navBook, opts),
+        isEpochCurrent,
         isFinalizing: () => state.finalizing,
         anchor: opts.anchor || null,
         page: Number.isFinite(opts.page) ? opts.page : null,
@@ -1102,15 +1219,24 @@
       });
       if (setOk === false || !navStillCurrent(gen, navBook, opts)) {
         try { (prepared.book || navBook).releaseTask(prepared.owner); } catch { }
-        restoreNavView(oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount);
-        state.busy = false;
+        if (gen !== state.navGeneration || state.finalizing) return false;
+        // setSection 内部失败会自动恢复；若未恢复（异常/被抢占），这里带 epoch 恢复。
+        if (openIntentChanged && gen !== state.navGeneration) {
+          await restoreOldViewForPendingOpen(gen, navBook, oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount);
+        } else if (!(paginator && paginator.ready && paginator.liveView && paginator.liveView.sectionIndex === (oldView && oldView.sectionIndex))) {
+          await restoreOldViewIfCurrent(gen, oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount);
+        } else restoreNavView(oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount);
+        if (gen === state.navGeneration) state.busy = false;
+        if (!syncStateToPaginatorLive() && oldView) { try { await paginator.restoreLiveView(oldView, { isCancelled: () => state.book !== navBook || state.finalizing, isFinalizing: () => state.finalizing }); syncStateToPaginatorLive(); } catch { } }
         try { hideLoading(); } catch { }
         return false;
       }
       if (opts.searchContext && !isSearchContextCurrent(opts.searchContext)) {
         try { (prepared.book || navBook).releaseTask(prepared.owner); } catch { }
-        restoreNavView(oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount);
-        state.busy = false;
+        if (gen === state.navGeneration) {
+          await restoreOldViewIfCurrent(gen, oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount);
+          state.busy = false;
+        }
         setStatus("当前查询已经变化，旧的搜索结果不再定位", true);
         return false;
       }
@@ -1118,17 +1244,16 @@
       state.prepared = prepared;
       state.pageIndex = paginator.pageIndex;
       state.pageCount = paginator.pageCount;
-      state.committedView = paginator.captureView ? paginator.captureView() : {
+      state.liveView = paginator.captureView ? paginator.captureView() : {
         prepared, sectionIndex: index, pageIndex: state.pageIndex, pageCount: state.pageCount,
         anchor: paginator.captureAnchor ? paginator.captureAnchor() : null,
       };
+      state.committedView = state.liveView;
       state.navPending = null;
       state.ready = true;
       state.busy = false;
       hideLoading();
       hideError();
-      if (previousOwner && previousOwner !== prepared.owner) { try { navBook.releaseTask(previousOwner); } catch { } }
-      try { navBook.releaseResourcesExcept(prepared.resources); } catch { }
       if (opts.page === "last") {
         paginator.goToPage(paginator.pageCount - 1, { animate: false, notify: true });
         state.pageIndex = paginator.pageIndex;
@@ -1142,6 +1267,18 @@
           await applySearchResult(opts.searchResult, opts.searchContext);
         }
       }
+      // 提交边界：highlight/fragment 期间同步取消仍属于未完成导航，恢复旧视图并释放候选。
+      if (!navStillCurrent(gen, navBook, opts)) {
+        try { (prepared.book || navBook).releaseTask(prepared.owner); } catch { }
+        state.activeSearchResult = null;
+        try { paginator.clearHighlights(); } catch { }
+        await restoreOldViewIfCurrent(gen, oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount);
+        state.busy = false;
+        try { hideLoading(); } catch { }
+        return false;
+      }
+      if (previousOwner && previousOwner !== prepared.owner) { try { navBook.releaseTask(previousOwner); } catch { } }
+      try { navBook.releaseResourcesExcept(prepared.resources); } catch { }
       rememberStablePosition();
       updateTocActive();
       updatePageUi();
@@ -1156,10 +1293,13 @@
       const releaseBook = (preparedForRelease && preparedForRelease.book) || (preparedForRelease && navBook) || navBook;
       if (!navStillCurrent(gen, navBook, opts)) { if (preparedForRelease) { try { releaseBook.releaseTask(preparedForRelease.owner); } catch { } } return false; }
       if (preparedForRelease) { try { releaseBook.releaseTask(preparedForRelease.owner); } catch { } }
-      restoreNavView(oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount);
-      state.busy = false;
-      showError("章节载入失败：" + (e.message || e), () => navigateToSpine(index, opts));
-      if (state.client) state.client.bookError(state.loadId, e.message || "章节载入失败", e.code || "SECTION_ERROR");
+      if (gen === state.navGeneration && !state.finalizing) {
+        await restoreOldViewIfCurrent(gen, oldView, oldSpine, oldPrepared, oldPageIndex, oldPageCount);
+        if (gen === state.navGeneration) state.busy = false;
+        try { hideLoading(); } catch { }
+        showError("章节载入失败：" + (e.message || e), () => navigateToSpine(index, opts));
+      }
+      if (state.client && gen === state.navGeneration) state.client.bookError(state.loadId, e.message || "章节载入失败", e.code || "SECTION_ERROR");
       return false;
     }
   }
@@ -1375,6 +1515,16 @@
     const intent = ++state.openIntent;   // 在读取文件字节之前就确定这次打开意图
     state.navGeneration++;
     invalidateSearch({ clearUI: true });
+    // 新文件意图到来时，旧书仍应是可读 liveView；先恢复被取消导航的旧视图再等待新字节。
+    if (state.navPending && state.navPending.oldView && paginator) {
+      const pending = state.navPending;
+      try {
+        const ok = await paginator.restoreLiveView(pending.oldView, { isCancelled: () => false, isFinalizing: () => false });
+        if (ok) {
+          restoreNavView(pending.oldView, state.spineIndex, state.prepared, state.pageIndex, state.pageCount);
+        }
+      } catch { }
+    }
     const name = file.name || "book.epub";
     if (!/\.epub$/i.test(name) && file.type !== "application/epub+zip") {
       setStatus("请选择一个 .epub 文件", true);
@@ -1562,6 +1712,27 @@
   async function finishAndAck(requestId) {
     if (state.finalizing) return;
     state.finalizing = true;
+    state.frozen = true;
+    // finalize 前若还有未提交导航：先恢复 liveView（用户实际在看的那一版），再冻结；
+    // 这样关闭回执和稳定位置都来自可读旧视图，而不是候选 DOM。
+    const pendingAtClose = state.navPending;
+    if (pendingAtClose && pendingAtClose.oldView && paginator) {
+      try {
+        const restored = await paginator.restoreLiveView(pendingAtClose.oldView, {
+          isCancelled: () => false,
+          isFinalizing: () => false,
+        });
+        if (restored && paginator.ready && paginator.liveView) {
+          state.navPending = null;
+          state.spineIndex = paginator.liveView.sectionIndex;
+          state.prepared = paginator.liveView.prepared;
+          state.pageIndex = paginator.liveView.pageIndex;
+          state.pageCount = paginator.liveView.pageCount;
+          state.liveView = paginator.captureView ? paginator.captureView() : paginator.liveView;
+          state.ready = true;
+        }
+      } catch { }
+    }
     // 收尾先冻结：结算最后页码输入/动画目标，停止所有输入、定时器与旧导航。
     try { settlePendingPageInputForClose(); } catch { }
     try { clearTimeout(state.saveTimer); state.saveTimer = 0; } catch { }
@@ -1574,16 +1745,28 @@
     // 先 settle 再 cancel：cancelAnimation 会清掉唯一 pending 动画目标。
     try { if (paginator) paginator.freezeForClose(); } catch { }
     rememberStablePosition();
-    let prefsOk = true, saveOk = true;
-    try { prefsOk = await flushPrefs(); } catch { prefsOk = false; }
-    try { saveOk = await flushSave(); } catch { saveOk = false; }
-    // 按 book 操作账本：A 的未解决失败不能被 B 的成功/全局 saveFailed=false 掩盖。
+    // R7-02：位置与设置并行发起，各自有界；设置回执卡住不得阻止位置提交。
+    const bounded = (p, ms, label) => Promise.race([
+      Promise.resolve(p).then((ok) => ({ ok: ok !== false, label })),
+      new Promise((resolve) => setTimeout(() => resolve({ ok: false, label, timeout: true }), ms)),
+    ]).catch(() => ({ ok: false, label, error: true }));
+    const [prefsRes, saveRes, metaRes] = await Promise.all([
+      bounded(flushPrefs(), 2800, "prefs"),
+      bounded(flushSave(), 2800, "position"),
+      bounded(state.pendingMetadata || Promise.resolve(), 2800, "metadata"),
+    ]);
+    const prefsOk = prefsRes.ok, saveOk = saveRes.ok;
+    // 书签/元数据请求已在宿主落盘但 promise 刚 resolve；它完成后的 markInteraction 不应把 finalize 判成未保存位置。
+    if (metaRes.ok) state.modified = false;
     const unresolvedFailures = [];
     try {
       for (const [bookId, snapshot] of state.failedSaves.entries()) {
         unresolvedFailures.push({ bookId, opVersion: snapshot.opVersion, sequence: snapshot.sequence, code: snapshot.failureCode || "UNRESOLVED" });
       }
     } catch { }
+    if (!prefsRes.ok) unresolvedFailures.push({ bookId: "", code: "PREFS_NOT_SETTLED", timeout: !!prefsRes.timeout });
+    if (!saveRes.ok) unresolvedFailures.push({ bookId: "", code: "POSITION_NOT_SETTLED", timeout: !!saveRes.timeout });
+    if (!metaRes.ok) unresolvedFailures.push({ bookId: "", code: "METADATA_NOT_SETTLED", timeout: !!metaRes.timeout });
     state.closeDiagnostics = unresolvedFailures.slice();
     const ok = !!(prefsOk && saveOk && !state.saveFailed && !state.modified &&
       !unresolvedFailures.length && !Object.keys(state.pendingPrefs || {}).length);

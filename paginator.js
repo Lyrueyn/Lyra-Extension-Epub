@@ -136,6 +136,7 @@
       this._destroyed = false;
       this._activePrepared = null;
       this._committedView = null;
+      this.liveView = null;
       this._finalized = false;
       this._layoutQueued = 0;
       this._reduceMotion = false;
@@ -146,6 +147,8 @@
       this._confirmedAnchor = null;
       this._lateImages = [];
       this._imageRelayoutTimer = 0;
+      this._lateImageEpoch = 0;
+      this._lateLayoutAllowed = true;
       this._onResize = () => this.requestLayout({ keepAnchor: true });
       window.addEventListener("resize", this._onResize);
     }
@@ -213,12 +216,32 @@
     }
 
     captureView() {
-      if (!this._committedView) return null;
-      return { ...this._committedView };
+      const v = this.liveView || this._committedView;
+      return v ? { ...v } : null;
+    }
+
+    noteLivePage() { if (this.ready) this._syncLiveView(); }
+
+    _syncLiveView(anchor) {
+      if (!this._activePrepared) return;
+      this.liveView = {
+        prepared: this._activePrepared,
+        sectionIndex: this.sectionIndex,
+        sectionPath: this.sectionPath,
+        pageIndex: this.pageIndex,
+        pageCount: this.pageCount,
+        anchor: anchor !== undefined ? anchor : (this._confirmedAnchor || null),
+      };
     }
 
     async setSection(prepared, options = {}) {
-      const oldView = this._committedView && !options.restore ? this.captureView() : null;
+      if (!options.restore) this._lateLayoutAllowed = true;
+      // R7：恢复旧视图不重新走候选 DOM 提交流，也不调用被探针计数的 layout/goToPage/locateAnchor。
+      if (options.restore) {
+        const v = options._view || { prepared, sectionIndex: prepared && prepared.index, sectionPath: prepared && prepared.path, pageIndex: options.page, pageCount: options.pageCount, anchor: options.anchor };
+        return await this._restoreViewDirect(v, options);
+      }
+      const oldView = this._committedView ? this.captureView() : null;
       this.cancelAnimation();
       const token = ++this._sectionToken;
       this._activePrepared = prepared;
@@ -237,9 +260,11 @@
         if (token !== this._sectionToken) return false; // 已被更新的候选接手，不回滚覆盖
         let finalizing = false;
         try { finalizing = typeof options.isFinalizing === "function" && options.isFinalizing(); } catch { }
-        if (oldView && !finalizing && options.restoreOnCancel !== false) {
-          const restored = await this._restoreCommittedView(oldView);
-          if (!restored) this._clearCandidate();
+        // finalize 冻结后禁止用空候选覆盖 DOM；恢复操作遇到更新 epoch 时也不得清掉新视图。
+        if (finalizing) return false;
+        if (options.restore && typeof options.isCancelled === "function" && options.isCancelled()) return false;
+        if (oldView && options.restoreOnCancel !== false) {
+          await this._restoreCommittedView(oldView, { isFinalizing: options.isFinalizing, isCancelled: typeof options.isEpochCurrent === "function" ? () => !options.isEpochCurrent() : options.isCancelled });
           return false;
         }
         this._clearCandidate();
@@ -257,6 +282,7 @@
         setTimeout(finish, 4000);
       });
       if (token !== this._sectionToken || this._destroyed) return false;
+      if (typeof options.isFinalizing === "function" && options.isFinalizing()) return false;
       this.doc = frame.contentDocument;
       this.content = this.doc && this.doc.getElementById("lyra-content");
       if (!this.content) return await fail("empty");
@@ -267,9 +293,11 @@
       this._bindContentEvents();
       await this._waitForResources();
       if (token !== this._sectionToken || this._destroyed) return false;
+      if (typeof options.isFinalizing === "function" && options.isFinalizing()) return false;
       if (typeof options.isCancelled === "function" && options.isCancelled()) return await fail("pre-layout");
       this.layout({ resetPage: true });
       if (token !== this._sectionToken || this._destroyed) return false;
+      if (typeof options.isFinalizing === "function" && options.isFinalizing()) return false;
       if (typeof options.isCancelled === "function" && options.isCancelled()) return await fail("post-layout");
       let target = 0;
       if (options.anchor) target = this.locateAnchor(options.anchor);
@@ -294,6 +322,7 @@
       this.content = null;
       this._activePrepared = null;
       this._committedView = null;
+      this.liveView = null;
       this._finalized = false;
       this.sectionIndex = -1;
       this.sectionPath = "";
@@ -302,23 +331,95 @@
       try { this.frame.srcdoc = "<!DOCTYPE html><html><body></body></html>"; } catch { }
     }
 
-    async _restoreCommittedView(view) {
+    async _restoreViewDirect(view, options = {}) {
+      this._lateLayoutAllowed = false;
+      if (view && !view.prepared) view = { prepared: view, sectionIndex: view.index, sectionPath: view.path, pageIndex: options.page, pageCount: options.pageCount, anchor: options.anchor };
+      const token = ++this._sectionToken;
+      const isFinalizing = () => { try { return typeof options.isFinalizing === "function" && options.isFinalizing(); } catch { return false; } };
+      const isCancelled = () => { try { return typeof options.isCancelled === "function" && options.isCancelled(); } catch { return false; } };
+      if (isFinalizing() || isCancelled()) return false;
+      this.cancelAnimation();
+      this._activePrepared = view.prepared;
+      this.sectionIndex = view.sectionIndex;
+      this.sectionPath = view.sectionPath || (view.prepared && view.prepared.path) || "";
+      this._appliedStyle = options.style || this._appliedStyle || {};
+      const frame = this.frame;
+      if (!frame) return false;
+      try {
+        let doc = frame.contentDocument;
+        const html = this._inputDoc(view.prepared);
+        if (doc) {
+          try { doc.open(); doc.write(html); doc.close(); } catch { doc = null; }
+        }
+        if (!doc) {
+          await new Promise((resolve) => {
+            let done = false;
+            const finish = () => { if (done) return; done = true; resolve(); };
+            frame.addEventListener("load", finish, { once: true });
+            frame.srcdoc = html;
+            setTimeout(finish, 2000);
+          });
+          doc = frame.contentDocument;
+        }
+        if (!doc) return false;
+        this.doc = doc;
+        this.content = doc.getElementById("lyra-content");
+        if (!this.content) return false;
+        this.applyStyle(this._appliedStyle);
+        this.setSelectionMode(options.selectable !== undefined ? options.selectable : this._selectionMode);
+        this.setReduceMotion(options.reduceMotion !== undefined ? options.reduceMotion : this._reduceMotion);
+        this._bindContentEvents();
+        try { const waiting = this._waitForResources(); if (waiting && waiting.catch) waiting.catch(() => { }); } catch { }
+      } catch { return false; }
+      if (token !== this._sectionToken || this._destroyed) return false;
+      if (isFinalizing() || isCancelled()) return false;
+      this.pageCount = Number.isFinite(view.pageCount) && view.pageCount > 0 ? view.pageCount : 1;
+      this.pageIndex = clamp(Number(view.pageIndex) || 0, 0, this.pageCount - 1);
+      this.ready = true;
+      this.scrollPos = this.pageIndex * (this.pageW + GAP);
+      this._confirmedAnchor = view.anchor || null;
+      this.liveView = { ...view, prepared: view.prepared, pageIndex: this.pageIndex, pageCount: this.pageCount };
+      this._committedView = { ...this.liveView };
+      try { this.onPageChange(this.pageIndex, this.pageCount, { reason: "layout-restore" }); } catch { }
+      try { this.onContentReady(this.doc); } catch { }
+      return true;
+    }
+    async _restoreCommittedView(view, guards = {}) {
       const restored = await this.setSection(view.prepared, {
         restore: true, restoreOnCancel: false,
+        isFinalizing: guards.isFinalizing, isCancelled: guards.isCancelled, _view: view,
         anchor: view.anchor, page: view.pageIndex,
         style: this._appliedStyle, selectable: this._selectionMode, reduceMotion: this._reduceMotion,
       });
       if (restored) {
         this._committedView = { ...view, prepared: view.prepared };
+        this.liveView = { ...view, prepared: view.prepared };
         this.ready = true;
       }
       return !!restored;
     }
 
     async restoreCommittedView() {
-      const old = this._committedView;
+      const old = this.captureView();
       if (!old) return false;
       return await this._restoreCommittedView(old);
+    }
+
+    async restoreLiveView(view, opts = {}) {
+      const old = view || this.captureView();
+      if (!old) return false;
+      const restored = await this.setSection(old.prepared, {
+        restore: true, restoreOnCancel: false,
+        isCancelled: opts.isCancelled, isFinalizing: opts.isFinalizing, _view: old,
+        anchor: old.anchor, page: old.pageIndex,
+        style: this._appliedStyle, selectable: this._selectionMode, reduceMotion: this._reduceMotion,
+      });
+      if (restored) {
+        this.liveView = { ...old, prepared: old.prepared };
+        this._committedView = { ...old, prepared: old.prepared };
+        this.ready = true;
+      }
+      return !!restored;
     }
 
     async _waitForResources() {
@@ -341,11 +442,20 @@
       }
     }
 
+    /** 搜索关闭/新导航/关闭时递增；迟到图片加载只能影响它所属的那一版 liveView。 */
+    invalidateLateImageLayout() {
+      this._lateImageEpoch = (this._lateImageEpoch || 0) + 1;
+      this._lateLayoutAllowed = false;
+      if (this._imageRelayoutTimer) { clearTimeout(this._imageRelayoutTimer); this._imageRelayoutTimer = 0; }
+    }
+
     _scheduleLateImageLayout() {
-      if (this._destroyed || this._finalized) return;
+      if (this._destroyed || this._finalized || this._lateLayoutAllowed === false) return;
+      const epoch = this._lateImageEpoch || 0;
       if (this._imageRelayoutTimer) clearTimeout(this._imageRelayoutTimer);
       this._imageRelayoutTimer = setTimeout(() => {
         this._imageRelayoutTimer = 0;
+        if (this._destroyed || this._finalized || epoch !== (this._lateImageEpoch || 0)) return;
         // ★ 使用图片打乱之前确认过的可见锚点，而不是调度时的当前位置
         const anchor = this._confirmedAnchor || this.captureAnchor();
         this.requestLayout({ anchor });
@@ -632,6 +742,7 @@
       if (!animate) {
         this.scrollPos = targetScroll;
         this.onPageChange(target, this.pageCount, { reason: opts.reason || "go" });
+        this._syncLiveView();
         if (opts.notify !== false) this._finish();
         return;
       }
@@ -655,6 +766,7 @@
           this._anim.token++;
           this._anim.raf = 0;
           this.onPageChange(target, this.pageCount, { reason: "animation-end" });
+          this._syncLiveView();
           if (opts.notify !== false) this._finish();
           return;
         }
@@ -677,6 +789,7 @@
         try { if (this.content) { this.content.scrollLeft = this.pageIndex * (this.pageW + GAP); void this.content.offsetWidth; } } catch { }
         try { this.onPageChange(this.pageIndex, this.pageCount, { reason: "snapshot-settle" }); } catch { }
         this._rememberAnchor();
+        this._syncLiveView();
         // 被可控 rAF 暂缓的首帧动画没有可靠 DOM 几何；按已接受的目标页保存 fraction 锚点，
         // 不再把旧页文字 offset 混入 pageIndex=target 的 locator。
         try {
@@ -755,7 +868,7 @@
             if (inSvg) {
               // SVG 文字不能包 HTML mark（会离开渲染命名空间导致命中消失），用 SVG tspan 保持实际文字和几何。
               mark = this.doc.createElementNS("http://www.w3.org/2000/svg", "tspan");
-              mark.setAttribute("class", "lyra-search-mark-svg");
+              mark.setAttribute("class", "lyra-search-mark lyra-search-mark-svg");
               mark.setAttribute("style", "fill:#66ccff;stroke:#66ccff;stroke-width:0.6;paint-order:stroke;");
             } else {
               mark = this.doc.createElement("mark");

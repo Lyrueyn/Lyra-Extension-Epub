@@ -124,6 +124,24 @@
   }
 
 
+  /** 清洗器与文字模型共用的唯一可见性样式白名单：只保留 display:none / 合法 visibility。
+   *  !important 去掉、无效值丢弃，保证“模型看到的”和 iframe 实际显示的是同一份声明。 */
+  function sanitizeVisibilityStyles(body) {
+    if (!body || !body.querySelectorAll) return;
+    for (const el of Array.from(body.querySelectorAll("*"))) {
+      if (!el.hasAttribute || !el.hasAttribute("style")) continue;
+      const safe = [];
+      for (const rawDecl of String(el.getAttribute("style") || "").split(";")) {
+        const m = /^\s*([a-zA-Z-]+)\s*:\s*([^!;]+?)\s*(?:!important\s*)?$/i.exec(rawDecl);
+        if (!m) continue;
+        const prop = m[1].toLowerCase(), val = m[2].trim().toLowerCase();
+        if (prop === "display" && val === "none") safe.push("display:none");
+        else if (prop === "visibility" && /^(hidden|visible|collapse)$/.test(val)) safe.push("visibility:" + val);
+      }
+      if (safe.length) el.setAttribute("style", safe.join(";"));
+      else el.removeAttribute("style");
+    }
+  }
   const TEXT_BLOCK_TAGS = new Set(("address,article,aside,blockquote,br,dd,div,dl,dt,figcaption,figure,footer,h1,h2,h3,h4,h5,h6,header,hr,li,main,nav,ol,p,pre,section,table,tr,td,th,ul").split(","));
   /** 统一文字模型：搜索、锚点、高亮共用；块级元素/换行插入 \n，文本节点记录映射。 */
   function buildTextModel(root) {
@@ -684,6 +702,7 @@
       // 删除活动内容和出版社样式；正文隔离在 sandbox iframe 里再兜一层
       const blocked = "script,style,link,meta,base,title,iframe,frame,frameset,object,embed,applet,form,input,button,select,textarea,audio,video,source,track,param";
       for (const el of Array.from(body.querySelectorAll(blocked))) el.remove();
+      sanitizeVisibilityStyles(body);
       for (const el of Array.from(body.querySelectorAll("*"))) {
         for (const attr of Array.from(el.attributes)) {
           const name = attr.name.toLowerCase();
@@ -691,17 +710,7 @@
           if (name.startsWith("data-lyra-")) el.removeAttribute(attr.name);
           else if (name.startsWith("on")) el.removeAttribute(attr.name);
           else if (name === "style") {
-            // 可见性必须与文字模型共用：只保留 display:none / visibility，不保留可注入布局的其它声明。
-            const safe = [];
-            for (const rawDecl of String(attr.value || "").split(";")) {
-              const m = /^\s*([a-zA-Z-]+)\s*:\s*([^!;]+?)\s*(?:!important\s*)?$/i.exec(rawDecl);
-              if (!m) continue;
-              const prop = m[1].toLowerCase(), val = m[2].trim().toLowerCase();
-              if (prop === "display" && val === "none") safe.push("display:none");
-              else if (prop === "visibility" && /^(hidden|visible|collapse)$/.test(val)) safe.push("visibility:" + val);
-            }
-            if (safe.length) el.setAttribute("style", safe.join(";"));
-            else el.removeAttribute("style");
+            // 统一由 sanitizeVisibilityStyles 处理，避免属性循环里二次分叉。
           }
           else if (name === "srcdoc" || name === "formaction" || name === "action" || name === "target") el.removeAttribute(attr.name);
           else if (name === "srcset" || name === "imagesrcset" || name === "xlink:href") {
@@ -797,7 +806,8 @@
       if (!body) return "";
       const blocked = "script,style,link,meta,base,title,iframe,frame,frameset,object,embed,applet,form,input,button,select,textarea,audio,video,source,track,param";
       for (const el of Array.from(body.querySelectorAll(blocked))) el.remove();
-      // ★ 和渲染 iframe 共用同一文字模型（块级换行、文本节点顺序一致）
+      // R7-05：冷索引必须读“清洗后实际交给 iframe 的文档”，不再解析原始源码。
+      sanitizeVisibilityStyles(body);
       return buildTextModel(body).text;
     }
 
