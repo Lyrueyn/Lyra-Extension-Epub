@@ -516,6 +516,14 @@
   async function flushSaveOnce(force = false) {
     if (!state.book) return true;
     if (!state.modified && !force) return true;
+    // 普通防抖保存先让翻页动画自然播完（最多约 300ms），不再在半途把它截断成跳页；
+    // 关闭/pagehide 路径已在调用前 settle/freeze，这里不会等待。
+    if (!state.finalizing && paginator && paginator._anim && paginator._anim.raf) {
+      // 用次数而非 Date.now 限界：宿主测试桩的时钟可能不前进，不能让保存卡死。
+      for (let i = 0; i < 20 && paginator._anim.raf && !state.finalizing; i++) {
+        await new Promise((r) => setTimeout(r, 16));
+      }
+    }
     try { paginator.settleForSnapshot(); } catch { }
     // 操作包在意图产生时冻结；已有失败快照且没有新用户输入时，重试必须沿用原 sequence/operationId。
     const failedForBook = state.failedSaves.get(state.book.bookId);

@@ -1,4 +1,4 @@
-﻿/* 分页器：章节正文放进禁脚本 iframe，按实际内容盒尺寸做横向分页。
+/* 分页器：章节正文放进禁脚本 iframe，按实际内容盒尺寸做横向分页。
  * 负责文字位置捕获/恢复、尺寸重排、时间驱动且一定能停下来的翻页动画。
  */
 (function (global) {
@@ -746,32 +746,49 @@
         if (opts.notify !== false) this._finish();
         return;
       }
+      // 柔和翻页：整页文字不再横向高速滑过（晃眼）。旧页淡出并朝翻页方向轻移几像素，
+      // 中点一次性换到新页，新页从反方向轻移淡入。只动 iframe 的 opacity/transform，
+      // 由合成器绘制，不触发重排；scrollPos 只在中点设置一次。
       const token = ++this._anim.token;
-      const from = this.scrollPos;
-      const duration = clamp(90 + Math.abs(targetScroll - from) / 18, 100, 260);
+      const dir = targetScroll >= this.scrollPos ? 1 : -1;
+      const OUT = 90, IN = 130, SHIFT = 14;
+      const frame = this.frame;
+      const fs = frame && frame.style;
       const started = performance.now();
-      let last = started;
-      let lastPos = from;
+      let swapped = false;
+      const paint = (opacity, dx) => {
+        if (!fs) return;
+        fs.opacity = String(opacity);
+        fs.transform = dx ? `translate3d(${dx.toFixed(2)}px,0,0)` : "";
+      };
+      const done = () => {
+        paint(1, 0);
+        if (fs) { fs.opacity = ""; fs.transform = ""; fs.willChange = ""; }
+        this.scrollPos = targetScroll;
+        this._anim.token++;
+        this._anim.raf = 0;
+        this._anim.restore = null;
+        this.onPageChange(target, this.pageCount, { reason: "animation-end" });
+        this._syncLiveView();
+        if (opts.notify !== false) this._finish();
+      };
+      if (fs) fs.willChange = "opacity, transform";
+      // 被取消（新翻页/换章/关闭）时必须把 iframe 样式复原，不能停在半透明。
+      this._anim.restore = () => { if (fs) { fs.opacity = ""; fs.transform = ""; fs.willChange = ""; } };
       const tick = (time) => {
         if (this._destroyed || token !== this._anim.token) return;
-        const elapsed = Math.max(0, time - started);
-        const p = Math.min(1, elapsed / duration);
-        const eased = 1 - Math.pow(1 - p, 3);
-        const pos = from + (targetScroll - from) * eased;
-        this.scrollPos = pos;
-        const moved = Math.abs(pos - lastPos) > 0.15;
-        // 精度阈值 / 连续无推进：校准到合法终点并停止
-        if (p >= 1 || Math.abs(targetScroll - pos) < 0.5 || (!moved && time - last > 36)) {
-          this.scrollPos = targetScroll;
-          this._anim.token++;
-          this._anim.raf = 0;
-          this.onPageChange(target, this.pageCount, { reason: "animation-end" });
-          this._syncLiveView();
-          if (opts.notify !== false) this._finish();
-          return;
+        const t = Math.max(0, time - started);
+        if (t < OUT) {
+          const p = t / OUT;
+          const e = p * p;                                   // ease-in
+          paint(1 - 0.85 * e, -dir * SHIFT * e);
+        } else {
+          if (!swapped) { this.scrollPos = targetScroll; swapped = true; }
+          const p = Math.min(1, (t - OUT) / IN);
+          const e = 1 - Math.pow(1 - p, 3);                  // ease-out
+          if (p >= 1) { done(); return; }
+          paint(0.15 + 0.85 * e, dir * SHIFT * (1 - e));
         }
-        last = time;
-        lastPos = pos;
         this._anim.raf = requestAnimationFrame(tick);
       };
       this._anim.raf = requestAnimationFrame(tick);
@@ -785,6 +802,7 @@
         try { cancelAnimationFrame(this._anim.raf); } catch { }
         this._anim.raf = 0;
         this._anim.token++;
+        if (this._anim.restore) { try { this._anim.restore(); } catch { } this._anim.restore = null; }
         this.scrollPos = this.pageIndex * (this.pageW + GAP);
         try { if (this.content) { this.content.scrollLeft = this.pageIndex * (this.pageW + GAP); void this.content.offsetWidth; } } catch { }
         try { this.onPageChange(this.pageIndex, this.pageCount, { reason: "snapshot-settle" }); } catch { }
@@ -826,6 +844,7 @@
       if (this._anim.raf) { try { cancelAnimationFrame(this._anim.raf); } catch { } }
       this._anim.raf = 0;
       this._anim.token++;
+      if (this._anim.restore) { try { this._anim.restore(); } catch { } this._anim.restore = null; }
     }
 
     getSelection() {
