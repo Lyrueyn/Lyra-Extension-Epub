@@ -1,4 +1,4 @@
-﻿/* 阅读器主控制器：生命周期、目录/书签/查找、设置、分页交互。 */
+/* 阅读器主控制器：生命周期、目录/书签/查找、设置、分页交互。 */
 (function () {
   "use strict";
 
@@ -367,8 +367,11 @@
     // 动画首帧尚未落地时不能抓 DOM；等 settle/动画结束后的 stable 位置再冻结操作包。
     if (!force && paginator._anim && paginator._anim.raf) return state.positionOperation || null;
     const existing = state.positionOperation;
+    // 复用条件绑定“同一本书实例 + 同一用户操作版本”。不能比较 openIntent：选新文件时
+    // openIntent 在读字节前就递增，此刻旧书仍在屏上，关闭/换书前 flush 必须沿用原操作身份。
     if (!force && existing && existing.bookId === state.book.bookId &&
-        existing.openIntent === state.openIntent && Number(existing.opVersion) === Number(state.saveOpVersion)) {
+        (existing.seqBook ? existing.seqBook === state.book : existing.openIntent === state.openIntent) &&
+        Number(existing.opVersion) === Number(state.saveOpVersion)) {
       return existing;
     }
     const usingStable = state.navPending || !state.ready || !paginator.ready;
@@ -458,6 +461,39 @@
     }
   }
 
+  /**
+   * 关闭时结算所有书的失败位置快照（含已切走的旧书）：用原操作身份与原资格重试；
+   * 原资格被拒时，只有宿主上真实落盘了更晚位置（positionRevision 超过快照基准）才算被取代，
+   * 单纯的交互/资格变化不是取代证明，失败继续保留并进入关闭诊断。
+   */
+  async function settleFailedSavesForClose() {
+    if (!state.client) return;
+    for (const [bookId, snapshot] of Array.from(state.failedSaves.entries())) {
+      if (state.failedSaves.get(bookId) !== snapshot) continue;
+      if (!snapshot.pos) continue;
+      try {
+        const res = await state.client.savePosition(bookId, snapshot.pos, snapshot.token || 0, snapshot.sequence, snapshot.operationId);
+        if (state.failedSaves.get(bookId) === snapshot) state.failedSaves.delete(bookId);
+        if (state.bookId === bookId) {
+          state.lastRevision = Number(res.revision) || state.lastRevision;
+          state.lastPositionRevision = Number(res.positionRevision) || state.lastPositionRevision;
+          state.saveFailed = false;
+        }
+        continue;
+      } catch (e) {
+        snapshot.failureCode = (e && (e.code || e.message)) || snapshot.failureCode || "SAVE_FAILED";
+        if (!(e && (e.code === "STALE_INTERACTION" || e.code === "TOKEN_OWNER_MISMATCH" || e.code === "STALE_SEQUENCE"))) continue;
+      }
+      try {
+        const diskRevision = await state.client.probePositionRevision(bookId);
+        if (Number(diskRevision) > Number(snapshot.baseRevision) && state.failedSaves.get(bookId) === snapshot) {
+          state.failedSaves.delete(bookId);
+          if (state.bookId === bookId) state.saveFailed = false;
+        }
+      } catch { }
+    }
+  }
+
   function scheduleSave(delay = 360) {
     if (!state.book || !state.modified || !state.ready) return;
     if (state.finalizing) return;
@@ -525,7 +561,7 @@
       state.lastPositionRevision = Number(res.positionRevision) || state.lastPositionRevision;
       const pendingFailure = state.failedSaves.get(snapshot.bookId);
       if (!pendingFailure || Number(pendingFailure.opVersion) <= Number(snapshot.opVersion)) state.failedSaves.delete(snapshot.bookId);
-      if (state.bookId === snapshot.bookId && state.openIntent === snapshot.openIntent) {
+      if (state.bookId === snapshot.bookId && (snapshot.seqBook ? state.book === snapshot.seqBook : state.openIntent === snapshot.openIntent)) {
         state.saveFailed = false;
         setSaveState(state.client.isPersistent ? "已保存阅读位置" : "位置已保存在当前窗口");
         state.positionRevisionByBook.set(snapshot.bookId, state.lastPositionRevision);
@@ -1755,6 +1791,11 @@
       bounded(flushPrefs(), 2800, "prefs"),
       bounded(flushSave(), 2800, "position"),
       bounded(state.pendingMetadata || Promise.resolve(), 2800, "metadata"),
+    ]);
+    // 结算其它书（含已切走的旧书）的失败位置快照：原身份重试，或以真实较新落盘位置为取代证明。
+    await Promise.race([
+      settleFailedSavesForClose().catch(() => { }),
+      new Promise((resolve) => setTimeout(resolve, 1200)),
     ]);
     const prefsOk = prefsRes.ok, saveOk = saveRes.ok;
     // 书签/元数据请求已在宿主落盘但 promise 刚 resolve；它完成后的 markInteraction 不应把 finalize 判成未保存位置。

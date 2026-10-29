@@ -1,4 +1,4 @@
-﻿/* 阅读状态客户端：R4 协议 2。
+/* 阅读状态客户端：R4 协议 2。
  * - 偏好授权是宿主不透明字符串 grant，不把 long/时间戳暴露给 JS Number；
  * - 偏好授权与阅读位置交互资格完全分离；
  * - 每个字段/书签/位置操作都带操作身份，回执只确认对应操作；
@@ -282,6 +282,16 @@
       };
     }
 
+    /** 只读查询某本书当前已落盘的位置修订；不改变当前书、不取得资格，用于关闭时判定失败快照是否被真实较新位置取代。 */
+    async probePositionRevision(bookId) {
+      if (this.isPersistent) {
+        const res = await this.request("state.load", { bookId });
+        return res.positionRevision != null ? (Number(res.positionRevision) || 0) : (Number(res.revision) || 0);
+      }
+      const data = this._localLoad(bookId);
+      return data.positionRevision != null ? (Number(data.positionRevision) || 0) : (Number(data.revision) || 0);
+    }
+
     async savePosition(bookId, position, interactionToken, sequence, operationId) {
       const seq = Number(sequence) || this.nextSequence();
       if (this.isPersistent) {
@@ -387,7 +397,13 @@
     _lsKey(bookId) { return "lyra_epub_state_" + (bookId || "unknown"); }
     _lsBookmarksKey(bookId) { return "lyra_epub_bookmarks_" + (bookId || "unknown"); }
     _checkLocalVersion(obj, kind, bookId) {
-      if (!obj || typeof obj !== "object" || Array.isArray(obj)) return true;
+      if (obj === null || obj === undefined) return true;
+      if (typeof obj !== "object" || Array.isArray(obj)) {
+        // 未知顶层结构（数组/标量）：当作未来格式，拒写并保留原字节。
+        const c = this._bookCorruption(bookId);
+        if (kind === "bookmarks") c.bookmarks = true; else c.position = true;
+        throw new ReaderStateError("LOCAL_UNKNOWN_STRUCTURE", "本地" + (kind === "bookmarks" ? "书签" : "位置") + "结构未知，未覆盖原数据");
+      }
       if (!Object.prototype.hasOwnProperty.call(obj, "version")) return true;
       const v = Number(obj.version);
       if (v === 1) return true;
@@ -429,6 +445,10 @@
       if (!raw) { this._prefsCorrupt = false; return null; }
       try {
         const data = JSON.parse(raw);
+        if (data !== null && (typeof data !== "object" || Array.isArray(data) || (data.preferences !== undefined && (typeof data.preferences !== "object" || data.preferences === null || Array.isArray(data.preferences))))) {
+          this._prefsCorrupt = true;
+          return null;
+        }
         if (data && typeof data === "object" && Object.prototype.hasOwnProperty.call(data, "version") && Number(data.version) !== 1) {
           this._prefsCorrupt = true;
           return null;
@@ -452,6 +472,8 @@
       if (raw) {
         try { existing = JSON.parse(raw) || {}; }
         catch { throw new ReaderStateError("LOCAL_CORRUPT", "本地设置损坏，未覆盖原设置"); }
+        if (typeof existing !== "object" || Array.isArray(existing) || (existing.preferences !== undefined && (typeof existing.preferences !== "object" || existing.preferences === null || Array.isArray(existing.preferences))))
+          throw new ReaderStateError("LOCAL_UNKNOWN_STRUCTURE", "本地设置结构未知，未覆盖原设置");
         if (existing && typeof existing === "object" && Object.prototype.hasOwnProperty.call(existing, "version") && Number(existing.version) !== 1)
           throw new ReaderStateError("LOCAL_UNKNOWN_VERSION", "本地设置版本未知，未覆盖原设置");
       }
