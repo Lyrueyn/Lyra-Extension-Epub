@@ -1,6 +1,6 @@
-﻿# Lyra EPUB Reader 0.6.0 候选版
+# Lyra EPUB Reader 0.6.0
 
-这是璃鸢镜的网页 EPUB 阅读器扩展，候选版本用于 M1–M4 验收，尚未正式发布。
+这是璃鸢镜的网页 EPUB 阅读器扩展。
 
 ## 运行
 
