@@ -1,4 +1,4 @@
-# Lyra EPUB Reader 0.6.0
+# Lyra EPUB Reader 0.6.1
 
 这是璃鸢镜的网页 EPUB 阅读器扩展。
 

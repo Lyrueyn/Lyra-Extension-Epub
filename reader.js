@@ -108,12 +108,21 @@
     return prefix + Date.now().toString(36) + "-" + (++state.prefsChangeCounter).toString(36) + "-" + Math.random().toString(36).slice(2, 8);
   }
 
+  let loadingDelayTimer = 0;
+  function clearLoadingDelay() { if (loadingDelayTimer) { clearTimeout(loadingDelayTimer); loadingDelayTimer = 0; } }
   function showLoading(text) {
+    clearLoadingDelay();
     $("loadingOverlay").classList.add("show");
     $("loadingText").textContent = text || "正在加载…";
   }
-  function hideLoading() { $("loadingOverlay").classList.remove("show"); }
+  /** 翻页切章：章节通常几十毫秒就绪，立刻盖遮罩会打断阅读；只有真的慢才显示。 */
+  function showLoadingDelayed(text, ms) {
+    clearLoadingDelay();
+    loadingDelayTimer = setTimeout(() => { loadingDelayTimer = 0; showLoading(text); }, ms);
+  }
+  function hideLoading() { clearLoadingDelay(); $("loadingOverlay").classList.remove("show"); }
   function showError(message, retry) {
+    clearLoadingDelay();
     $("errorBox").classList.add("show");
     $("errorText").textContent = message || "打开失败";
     $("loadingOverlay").classList.remove("show");
@@ -1003,6 +1012,7 @@
         const dir = state.turnQueue.shift();
         const next = state.pageIndex + dir;
         if (next >= 0 && next < state.pageCount) {
+          cancelChapterFx();   // 切章淡入没播完就接着翻页：让章内翻页动画接管
           paginator.goToPage(next, { animate: true, notify: true });
           state.pageIndex = paginator.pageIndex;
           state.pageCount = paginator.pageCount;
@@ -1057,13 +1067,13 @@
       if (!state.book || state.finalizing) return;
       clearTurnQueue();
       const idx = nextReadableSpineIndex(state.spineIndex, -1);
-      if (idx >= 0) await navigateToSpine(idx, { page: "last", save: true, reason: "chapter-prev" });
+      if (idx >= 0) await navigateToSpine(idx, { page: "last", save: true, reason: "chapter-prev", fxDir: -1 });
     });
     $("chapterNext").addEventListener("click", async () => {
       if (!state.book || state.finalizing) return;
       clearTurnQueue();
       const idx = nextReadableSpineIndex(state.spineIndex, 1);
-      if (idx >= 0) await navigateToSpine(idx, { page: 0, save: true, reason: "chapter-next" });
+      if (idx >= 0) await navigateToSpine(idx, { page: 0, save: true, reason: "chapter-next", fxDir: 1 });
     });
     $("pageInput").addEventListener("keydown", (ev) => {
       if (ev.key === "Enter") { ev.preventDefault(); commitPageInput(); }
@@ -1201,7 +1211,52 @@
     return ok;
   }
 
+  // 切章过渡：和章内翻页（paginator.goToPage 的 90ms 淡出 / 130ms 淡入 / 14px 轻移）同一套手感。
+  // 动画用 Web Animations 作用在 iframe 元素本身，srcdoc 重载时仍然保持；
+  // 切章失败/被取消/关闭时 cancel() 直接复原，不会停在半透明。
+  const CH_OUT = 90, CH_IN = 130, CH_SHIFT = 14;
+  let chapterInFx = null;
+  function cancelChapterFx() {
+    if (chapterInFx) { try { chapterInFx.cancel(); } catch { } chapterInFx = null; }
+  }
+  function chapterFxEnabled() {
+    const f = $("chapterFrame");
+    return !!(f && typeof f.animate === "function" && !state.prefs.reduceMotion && paginator && paginator.ready && !state.finalizing);
+  }
+
   async function navigateToSpine(index, opts = {}) {
+    if (!(opts.fromTurn || opts.fxDir) || !chapterFxEnabled()) return navigateToSpineCore(index, opts);
+    const frame = $("chapterFrame");
+    const dir = opts.fxDir || (opts.page === "last" ? -1 : 1);
+    cancelChapterFx();
+    let out = null;
+    try {
+      out = frame.animate([
+        { opacity: 1, transform: "translate3d(0,0,0)" },
+        { opacity: 0.15, transform: `translate3d(${-dir * CH_SHIFT}px,0,0)` },
+      ], { duration: CH_OUT, easing: "ease-in", fill: "forwards" });
+      await Promise.race([out.finished.catch(() => { }), new Promise((r) => setTimeout(r, CH_OUT + 80))]);
+    } catch { }
+    let ok = false;
+    try { ok = await navigateToSpineCore(index, opts); }
+    finally {
+      if (ok && !state.finalizing) {
+        try {
+          chapterInFx = frame.animate([
+            { opacity: 0.15, transform: `translate3d(${dir * CH_SHIFT}px,0,0)` },
+            { opacity: 1, transform: "translate3d(0,0,0)" },
+          ], { duration: CH_IN, easing: "cubic-bezier(.33,1,.68,1)" });
+          const fx = chapterInFx;
+          fx.finished.then(() => { if (chapterInFx === fx) chapterInFx = null; }, () => { });
+        } catch { chapterInFx = null; }
+      }
+      // 先挂上淡入再撤掉淡出的保持帧，中间不会闪一帧全不透明
+      try { if (out) out.cancel(); } catch { }
+    }
+    return ok;
+  }
+
+  async function navigateToSpineCore(index, opts = {}) {
     if (!state.book || state.finalizing) return false;
     // 整段导航绑定原 book 实例；旧书迟到任务只能释放旧书自己的 owner，不能碰当前新书。
     const navBook = state.book;
@@ -1221,7 +1276,8 @@
     state.ready = false;
     state.pendingFrag = opts.fragment || "";
     if (paginator) { try { paginator.invalidateLateImageLayout(); paginator.cancelAnimation(); paginator.clearHighlights(); } catch { } }
-    showLoading(opts.fromTurn ? "正在切章…" : "正在载入章节…");
+    if (opts.fromTurn || opts.fxDir) showLoadingDelayed("正在切章…", 450);
+    else showLoading("正在载入章节…");
     showPageFrame();
     await new Promise((r) => requestAnimationFrame(r));
     try {
