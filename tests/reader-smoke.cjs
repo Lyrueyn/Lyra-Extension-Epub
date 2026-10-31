@@ -1,4 +1,4 @@
-﻿/* 浏览器层回归：使用候选扩展文件和合成书，不修改安装目录/用户书库。
+/* 浏览器层回归：使用候选扩展文件和合成书，不修改安装目录/用户书库。
  * 运行：node tests/reader-smoke.cjs
  * 环境：PLAYWRIGHT_MODULE、LYRA_BROWSER_PATH 可选（同 baseline-probe.cjs）。
  */
@@ -210,6 +210,37 @@ function record(id, name, status, detail) {
     // 且 1800ms 后队列必须清空、busy 必须结束，不能停手后继续堆积。
     record("A12c", "burst clicks after cooldown advance fast without backlog",
       burst.after === burst.before + 5 && burst.queue === 0 && !burst.busy ? "PASS" : "FAIL", burst);
+
+    // 跨章后第一次翻页：章末点击进入下一章，等章节过渡结束并空闲后立刻点下一页，
+    // 检查点击是否被接受、动画 rAF 是否启动、turnBusy 是否能结束。
+    const cross = await page.evaluate(async () => {
+      const d = window.__lyraDebug;
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      d.paginator.goToPage(d.paginator.pageCount - 1, { animate: false, notify: true });
+      await sleep(80);
+      const before = { spine: d.state.spineIndex, page: d.paginator.pageIndex, count: d.paginator.pageCount };
+      const t0 = performance.now();
+      document.getElementById("pageNext").click();   // 跨章
+      let crossed = false;
+      for (let i = 0; i < 150; i++) {
+        await sleep(10);
+        if (d.state.spineIndex !== before.spine) { crossed = true; break; }
+      }
+      for (let i = 0; i < 150 && d.state.turnBusy; i++) await sleep(10);
+      const chapterDone = { crossed, spine: d.state.spineIndex, page: d.paginator.pageIndex, busy: d.state.turnBusy, elapsed: performance.now() - t0 };
+      const t1 = performance.now();
+      const pageBefore = d.paginator.pageIndex;
+      const busyBefore = d.state.turnBusy;
+      document.getElementById("pageNext").click();   // 跨章后的第一次普通翻页
+      const clicked = { pageBefore, busyAtClick: busyBefore };
+      await sleep(40);
+      const immediate = { page: d.paginator.pageIndex, busy: d.state.turnBusy, raf: d.paginator._anim && d.paginator._anim.raf, elapsed: performance.now() - t1 };
+      await sleep(300);
+      const after = { page: d.paginator.pageIndex, busy: d.state.turnBusy };
+      return { before, chapterDone, clicked, immediate, after };
+    });
+    record("A12d", "first turn after chapter starts promptly",
+      cross.chapterDone.crossed && cross.immediate.raf !== 0 && cross.after.page === cross.clicked.pageBefore + 1 && !cross.after.busy ? "PASS" : "FAIL", cross);
 
     // 选择文字不翻页
     await open("normal");

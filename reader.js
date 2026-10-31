@@ -61,6 +61,7 @@
     navGeneration: 0,
     turnQueue: [],
     turnBusy: false,
+    chapterTurning: false,   // 正在跨章过渡：允许保留 1 个用户点击，章切换完成后立刻翻
     lastTurnAt: -Infinity,   // 上一次被接受的翻页时间（performance.now），用于 1/3 动画时长冷却
     interactionToken: 0,
     saveTimer: 0,
@@ -996,8 +997,12 @@
 
   function enqueueTurn(dir) {
     if (!state.book || state.finalizing) return;
-    // 当前翻页动画还在进行：直接丢弃这次点击（不排队，避免停手后继续翻页）。
-    if (state.turnBusy) return;
+    // 页内动画期间点击丢弃，避免停手后继续翻页；
+    // 但跨章过渡期间保留 1 个点击，章切换完成后立即执行，避免“跨章后第一次点击像丢了”。
+    if (state.turnBusy) {
+      if (state.chapterTurning && state.turnQueue.length < 1) state.turnQueue.push(dir > 0 ? 1 : -1);
+      return;
+    }
     state.turnQueue = [dir > 0 ? 1 : -1];
     processTurns();
   }
@@ -1040,7 +1045,9 @@
         }
         const nextChapter = dir > 0 ? nextReadableSpineIndex(state.spineIndex, 1) : nextReadableSpineIndex(state.spineIndex, -1);
         if (nextChapter >= 0) {
-          await navigateToSpine(nextChapter, { page: dir > 0 ? 0 : "last", save: true, reason: "turn", fromTurn: true });
+          state.chapterTurning = true;
+          try { await navigateToSpine(nextChapter, { page: dir > 0 ? 0 : "last", save: true, reason: "turn", fromTurn: true }); }
+          finally { state.chapterTurning = false; }
         } else {
           break;   // 到达书边界，剩余输入逐次丢弃
         }
@@ -1237,7 +1244,7 @@
   // 切章过渡：和章内翻页（paginator.goToPage 的 90ms 淡出 / 130ms 淡入 / 14px 轻移）同一套手感。
   // 动画用 Web Animations 作用在 iframe 元素本身，srcdoc 重载时仍然保持；
   // 切章失败/被取消/关闭时 cancel() 直接复原，不会停在半透明。
-  const CH_OUT = 90, CH_IN = 130, CH_SHIFT = 14;
+  const CH_OUT = 40, CH_IN = 60, CH_SHIFT = 14;
   let chapterInFx = null;
   function cancelChapterFx() {
     if (chapterInFx) { try { chapterInFx.cancel(); } catch { } chapterInFx = null; }
