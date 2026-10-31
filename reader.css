@@ -33,10 +33,10 @@ button.icon { width: 32px; padding: 6px 0; text-align: center; font-size: 15px; 
 .side-tabs { display: flex; gap: 6px; padding: 10px 10px 6px; border-bottom: 1px solid var(--line); flex: none; }
 .side-tabs button { flex: 1; background: transparent; border-color: transparent; color: var(--sub); }
 .side-tabs button.active { background: #2a2d33; color: #fff; }
-.side-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 8px 8px 24px; scrollbar-gutter: stable; }
+.side-scroll { flex: 1; overflow-y: auto; overflow-x: clip; padding: 8px 8px 24px; scrollbar-gutter: stable; }
 .side-scroll::-webkit-scrollbar { width: 8px; }
 .side-scroll::-webkit-scrollbar-thumb { background: #3a3a3a; border-radius: 6px; }
-.toc-item { display: block; width: 100%; text-align: left; background: transparent; border: 0; color: var(--text); padding: 6px 8px; border-radius: 6px; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.toc-item { display: block; width: 100%; text-align: left; background: transparent; border: 0; color: var(--text); padding: 6px 8px; border-radius: 6px; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; white-space: normal; }
 .toc-item:hover { background: #24272c; }
 .toc-item.active { background: #2a2d33; color: #fff; }
 .toc-children { display: none; }

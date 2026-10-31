@@ -33,7 +33,7 @@
     #lyra-content image { max-width:100%; }
     #lyra-content table { max-width:100%; border-collapse:collapse; margin:0 0 1em; }
     #lyra-content td, #lyra-content th { padding:4px 8px; border-bottom:1px solid #444; vertical-align:top; overflow-wrap:anywhere; }
-    #lyra-content ul, #lyra-content ol { margin:0 0 1em; padding-left:1.5em; }
+    #lyra-content ul, #lyra-content ol { margin:0 0 1em; padding-left:2.6em; }
     #lyra-content li { margin:0 0 .35em; }
     #lyra-content blockquote { margin:0 0 1em; padding-left:14px; border-left:3px solid #66ccff; }
     #lyra-content pre { white-space:pre-wrap; overflow-wrap:anywhere; max-width:100%; }
