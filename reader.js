@@ -8,6 +8,10 @@
   const paginatorModule = window.LyraPaginator;
   const searchModule = window.LyraSearch;
 
+  // 翻页冷却：点击/按键后至少过 1/3 个翻页动画时长才接受下一次翻页，避免快速连点打断动画造成卡顿。
+  // 动画总时长由 paginator.js 的 TURN_ANIM_OUT_MS + TURN_ANIM_IN_MS 提供（当前 90+130=220ms → 冷却约 73ms）。
+  const TURN_COOLDOWN_MS = (Number(paginatorModule && paginatorModule.TURN_ANIM_MS) || 220) / 3;
+
   const DEFAULT_PREFS = {
     fontSize: 22,
     lineHeight: 1.95,
@@ -49,6 +53,7 @@
     navGeneration: 0,
     turnQueue: [],
     turnBusy: false,
+    lastTurnAt: -Infinity,   // 上一次被接受的翻页时间（performance.now），用于 1/3 动画时长冷却
     interactionToken: 0,
     saveTimer: 0,
     prefsSaveTimer: 0,
@@ -1037,8 +1042,14 @@
 
   function userTurn(dir) {
     if (!state.book || state.finalizing) return;
-    // 输入先入队，不能因为等待交互资格丢掉快速连续点击
+    // 冷却期内直接丢弃这次输入；不排队，否则快速连点仍会连续打断动画。
+    // 减少动画模式下没有动画可打断，不额外限速。
+    const cooldown = state.prefs.reduceMotion ? 0 : TURN_COOLDOWN_MS;
+    const now = performance.now();
+    if (cooldown > 0 && now - state.lastTurnAt < cooldown) return;
+    state.lastTurnAt = now;
     markInteraction();
+    // 输入先入队，不能因为等待交互资格丢掉快速连续点击（冷却通过后仍保留原有队列语义）
     enqueueTurn(dir);
   }
 

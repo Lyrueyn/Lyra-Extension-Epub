@@ -1,4 +1,4 @@
-﻿/* 浏览器层回归：使用候选扩展文件和合成书，不修改安装目录/用户书库。
+/* 浏览器层回归：使用候选扩展文件和合成书，不修改安装目录/用户书库。
  * 运行：node tests/reader-smoke.cjs
  * 环境：PLAYWRIGHT_MODULE、LYRA_BROWSER_PATH 可选（同 baseline-probe.cjs）。
  */
@@ -156,6 +156,25 @@ function record(id, name, status, detail) {
     await page.waitForTimeout(1600);
     const rapid = await pageInfo();
     record("A12", "20 rapid page turns", rapid.spine >= 0 && rapid.spine <= 2 && rapid.page >= 0 && rapid.page < rapid.total ? "PASS" : "FAIL", rapid);
+
+    // 翻页冷却：点击后 1/3 动画时长（220/3≈73ms）内的第二次点击必须被丢弃；
+    // 超过冷却后再点击才允许继续翻页。
+    const cooldown = await page.evaluate(async () => {
+      const d = window.__lyraDebug;
+      d.paginator.goToPage(1, { animate: false, notify: true });
+      await new Promise((r) => setTimeout(r, 120));
+      const before = d.paginator.pageIndex;
+      document.getElementById("pageNext").click();
+      document.getElementById("pageNext").click();   // 冷却期内：应被丢弃
+      await new Promise((r) => setTimeout(r, 100));
+      const afterTwo = d.paginator.pageIndex;
+      document.getElementById("pageNext").click();   // 冷却已过：应接受
+      await new Promise((r) => setTimeout(r, 100));
+      const afterThird = d.paginator.pageIndex;
+      return { before, afterTwo, afterThird, count: d.paginator.pageCount };
+    });
+    record("A12b", "page-turn cooldown rejects click within 1/3 animation",
+      cooldown.afterTwo === cooldown.before + 1 && cooldown.afterThird === cooldown.afterTwo + 1 ? "PASS" : "FAIL", cooldown);
 
     // 选择文字不翻页
     await open("normal");

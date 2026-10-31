@@ -5,6 +5,10 @@
   "use strict";
 
   const GAP = 64;
+  // 翻页动画总时长 = 旧页淡出 OUT + 新页淡入 IN；阅读器用它算"点击冷却"（1/3 动画时长）。
+  const TURN_ANIM_OUT_MS = 90;
+  const TURN_ANIM_IN_MS = 130;
+  const TURN_ANIM_MS = TURN_ANIM_OUT_MS + TURN_ANIM_IN_MS;
   const CONTENT_CSS = `
     :root {
       --lyra-bg: #121212;
@@ -751,7 +755,7 @@
       // 由合成器绘制，不触发重排；scrollPos 只在中点设置一次。
       const token = ++this._anim.token;
       const dir = targetScroll >= this.scrollPos ? 1 : -1;
-      const OUT = 90, IN = 130, SHIFT = 14;
+      const OUT = TURN_ANIM_OUT_MS, IN = TURN_ANIM_IN_MS, SHIFT = 14;
       const frame = this.frame;
       const fs = frame && frame.style;
       const started = performance.now();
@@ -914,5 +918,5 @@
     }
   }
 
-  global.LyraPaginator = { Paginator, GAP, walkTextNodes, nodePath, normalizeText };
+  global.LyraPaginator = { Paginator, GAP, TURN_ANIM_MS, walkTextNodes, nodePath, normalizeText };
 })(window);
