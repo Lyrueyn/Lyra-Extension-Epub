@@ -775,10 +775,13 @@
         this._anim.restore = null;
         const resolve = this._anim.resolve;
         this._anim.resolve = null;
-        this.onPageChange(target, this.pageCount, { reason: "animation-end" });
-        this._syncLiveView();
-        if (opts.notify !== false) this._finish();
-        if (resolve) resolve();
+        try {
+          this.onPageChange(target, this.pageCount, { reason: "animation-end" });
+          this._syncLiveView();
+          if (opts.notify !== false) this._finish();
+        } finally {
+          if (resolve) resolve();
+        }
       };
       if (fs) fs.willChange = "opacity, transform";
       // 被取消（新翻页/换章/关闭）时必须把 iframe 样式复原，不能停在半透明。

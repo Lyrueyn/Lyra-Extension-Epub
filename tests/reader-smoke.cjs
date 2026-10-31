@@ -176,6 +176,38 @@ function record(id, name, status, detail) {
     record("A12b", "page-turn cooldown rejects click within 1/3 animation",
       cooldown.afterTwo === cooldown.before + 1 && cooldown.afterThird === cooldown.afterTwo + 1 ? "PASS" : "FAIL", cooldown);
 
+    // 快速但间隔超过冷却的连点：每次都应被接受，且串行动画不应把后续翻页卡死。
+    const burst = await page.evaluate(async () => {
+      const d = window.__lyraDebug;
+      const p = d.paginator;
+      const animLog = [];
+      const origGo = p.goToPage.bind(p);
+      const origCancel = p.cancelAnimation.bind(p);
+      p.goToPage = (...args) => {
+        animLog.push({ type: "go", target: args[0] });
+        const pr = origGo(...args);
+        if (pr && pr.then) pr.then(() => animLog.push({ type: "resolved", target: args[0] }));
+        return pr;
+      };
+      p.cancelAnimation = () => {
+        animLog.push({ type: "cancel", page: p.pageIndex, raf: p._anim.raf, hasResolve: !!p._anim.resolve });
+        return origCancel();
+      };
+      d.paginator.goToPage(1, { animate: false, notify: true });
+      await new Promise((r) => setTimeout(r, 120));
+      const before = d.paginator.pageIndex;
+      const snaps = [];
+      for (let i = 0; i < 5; i++) {
+        document.getElementById("pageNext").click();
+        await new Promise((r) => setTimeout(r, 100));   // > 73ms 冷却、< 220ms 动画
+        snaps.push({ i, page: d.paginator.pageIndex, queue: d.state.turnQueue.length, busy: d.state.turnBusy, raf: d.paginator._anim && d.paginator._anim.raf });
+      }
+      await new Promise((r) => setTimeout(r, 1800));      // 留足串行动画时间
+      return { before, after: d.paginator.pageIndex, count: d.paginator.pageCount, snaps, animLog };
+    });
+    record("A12c", "burst clicks over cooldown still advance serially",
+      burst.after === burst.before + 5 ? "PASS" : "FAIL", burst);
+
     // 选择文字不翻页
     await open("normal");
     await page.evaluate(() => {

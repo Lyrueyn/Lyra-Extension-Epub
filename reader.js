@@ -8,9 +8,17 @@
   const paginatorModule = window.LyraPaginator;
   const searchModule = window.LyraSearch;
 
+  // 翻页动画总时长（由 paginator.js 导出，默认 90+130=220ms）。
+  const TURN_ANIM_MS = Number(paginatorModule && paginatorModule.TURN_ANIM_MS) || 220;
   // 翻页冷却：点击/按键后至少过 1/3 个翻页动画时长才接受下一次翻页，避免快速连点打断动画造成卡顿。
-  // 动画总时长由 paginator.js 的 TURN_ANIM_OUT_MS + TURN_ANIM_IN_MS 提供（当前 90+130=220ms → 冷却约 73ms）。
-  const TURN_COOLDOWN_MS = (Number(paginatorModule && paginatorModule.TURN_ANIM_MS) || 220) / 3;
+  const TURN_COOLDOWN_MS = TURN_ANIM_MS / 3;
+
+  // 翻页串行节拍：翻页动画是 220ms；用计时器等完整动画时长再处理下一次排队翻页。
+  // 不依赖 rAF/Promise 的结束回调（宿主/后台标签页可能暂停 rAF，导致 turnBusy 永远卡住）。
+  function waitTurnAnimation() {
+    if (state.prefs.reduceMotion) return Promise.resolve();
+    return new Promise((resolve) => setTimeout(resolve, TURN_ANIM_MS + 40));
+  }
 
   const DEFAULT_PREFS = {
     fontSize: 22,
@@ -1024,9 +1032,9 @@
           state.modified = true;
           updatePageUi();
           scheduleSave(60);
-          // ★ 串行化：等这一页动画真正结束再处理队列里的下一次翻页。
-          //   否则快速点击会连续 cancelAnimation，极少数页会直接跳过动画（用户实测）。
-          if (anim && typeof anim.then === "function") await anim;
+          // ★ 串行化：按完整动画时长等待后再处理队列里的下一次翻页。
+          //   不 await 动画 Promise（rAF 被暂停时 Promise 可能永不结束，导致“点几下翻不了页”）。
+          await waitTurnAnimation();
           continue;
         }
         const nextChapter = dir > 0 ? nextReadableSpineIndex(state.spineIndex, 1) : nextReadableSpineIndex(state.spineIndex, -1);
