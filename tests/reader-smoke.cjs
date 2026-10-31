@@ -169,7 +169,7 @@ function record(id, name, status, detail) {
       await new Promise((r) => setTimeout(r, 100));
       const afterTwo = d.paginator.pageIndex;
       document.getElementById("pageNext").click();   // 冷却已过：应接受
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 360));  // 等当前页动画完成并串行处理队列
       const afterThird = d.paginator.pageIndex;
       return { before, afterTwo, afterThird, count: d.paginator.pageCount };
     });

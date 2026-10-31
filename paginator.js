@@ -136,7 +136,7 @@
       this.ready = false;
       this.sectionIndex = -1;
       this.sectionPath = "";
-      this._anim = { raf: 0, token: 0 };
+      this._anim = { raf: 0, token: 0, resolve: null };
       this._destroyed = false;
       this._activePrepared = null;
       this._committedView = null;
@@ -748,12 +748,13 @@
         this.onPageChange(target, this.pageCount, { reason: opts.reason || "go" });
         this._syncLiveView();
         if (opts.notify !== false) this._finish();
-        return;
+        return Promise.resolve();
       }
       // 柔和翻页：整页文字不再横向高速滑过（晃眼）。旧页淡出并朝翻页方向轻移几像素，
       // 中点一次性换到新页，新页从反方向轻移淡入。只动 iframe 的 opacity/transform，
       // 由合成器绘制，不触发重排；scrollPos 只在中点设置一次。
       const token = ++this._anim.token;
+      const animDone = new Promise((resolve) => { this._anim.resolve = resolve; });
       const dir = targetScroll >= this.scrollPos ? 1 : -1;
       const OUT = TURN_ANIM_OUT_MS, IN = TURN_ANIM_IN_MS, SHIFT = 14;
       const frame = this.frame;
@@ -772,9 +773,12 @@
         this._anim.token++;
         this._anim.raf = 0;
         this._anim.restore = null;
+        const resolve = this._anim.resolve;
+        this._anim.resolve = null;
         this.onPageChange(target, this.pageCount, { reason: "animation-end" });
         this._syncLiveView();
         if (opts.notify !== false) this._finish();
+        if (resolve) resolve();
       };
       if (fs) fs.willChange = "opacity, transform";
       // 被取消（新翻页/换章/关闭）时必须把 iframe 样式复原，不能停在半透明。
@@ -796,6 +800,7 @@
         this._anim.raf = requestAnimationFrame(tick);
       };
       this._anim.raf = requestAnimationFrame(tick);
+      return animDone;
     }
 
     /** 换书/关闭前把未完成的翻页动画定格到目标页，保证快照捕获的是用户最后看到的页。
@@ -849,6 +854,9 @@
       this._anim.raf = 0;
       this._anim.token++;
       if (this._anim.restore) { try { this._anim.restore(); } catch { } this._anim.restore = null; }
+      const resolve = this._anim.resolve;
+      this._anim.resolve = null;
+      if (resolve) resolve();
     }
 
     getSelection() {

@@ -1018,12 +1018,15 @@
         const next = state.pageIndex + dir;
         if (next >= 0 && next < state.pageCount) {
           cancelChapterFx();   // 切章淡入没播完就接着翻页：让章内翻页动画接管
-          paginator.goToPage(next, { animate: true, notify: true });
+          const anim = paginator.goToPage(next, { animate: true, notify: true });
           state.pageIndex = paginator.pageIndex;
           state.pageCount = paginator.pageCount;
           state.modified = true;
           updatePageUi();
           scheduleSave(60);
+          // ★ 串行化：等这一页动画真正结束再处理队列里的下一次翻页。
+          //   否则快速点击会连续 cancelAnimation，极少数页会直接跳过动画（用户实测）。
+          if (anim && typeof anim.then === "function") await anim;
           continue;
         }
         const nextChapter = dir > 0 ? nextReadableSpineIndex(state.spineIndex, 1) : nextReadableSpineIndex(state.spineIndex, -1);
