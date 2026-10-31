@@ -1,4 +1,4 @@
-/* 浏览器层回归：使用候选扩展文件和合成书，不修改安装目录/用户书库。
+﻿/* 浏览器层回归：使用候选扩展文件和合成书，不修改安装目录/用户书库。
  * 运行：node tests/reader-smoke.cjs
  * 环境：PLAYWRIGHT_MODULE、LYRA_BROWSER_PATH 可选（同 baseline-probe.cjs）。
  */
@@ -200,7 +200,7 @@ function record(id, name, status, detail) {
       const snaps = [];
       for (let i = 0; i < 5; i++) {
         document.getElementById("pageNext").click();
-        await new Promise((r) => setTimeout(r, 100));   // > 73ms 冷却、< 220ms 动画
+        await new Promise((r) => setTimeout(r, 140));   // > 33ms 冷却且 > 100ms 动画，5 次都应接受
         snaps.push({ i, page: d.paginator.pageIndex, queue: d.state.turnQueue.length, busy: d.state.turnBusy, raf: d.paginator._anim && d.paginator._anim.raf });
       }
       await new Promise((r) => setTimeout(r, 1800));      // 留足串行动画时间

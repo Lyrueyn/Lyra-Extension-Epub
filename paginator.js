@@ -1,4 +1,4 @@
-/* 分页器：章节正文放进禁脚本 iframe，按实际内容盒尺寸做横向分页。
+﻿/* 分页器：章节正文放进禁脚本 iframe，按实际内容盒尺寸做横向分页。
  * 负责文字位置捕获/恢复、尺寸重排、时间驱动且一定能停下来的翻页动画。
  */
 (function (global) {
@@ -6,8 +6,9 @@
 
   const GAP = 64;
   // 翻页动画总时长 = 旧页淡出 OUT + 新页淡入 IN；阅读器用它算"点击冷却"（1/3 动画时长）。
-  const TURN_ANIM_OUT_MS = 90;
-  const TURN_ANIM_IN_MS = 130;
+  // 220ms 对快速翻页偏慢，改成 100ms（40+60）：每页仍有完整淡出/淡入，但不会等太久。
+  const TURN_ANIM_OUT_MS = 40;
+  const TURN_ANIM_IN_MS = 60;
   const TURN_ANIM_MS = TURN_ANIM_OUT_MS + TURN_ANIM_IN_MS;
   const CONTENT_CSS = `
     :root {
@@ -787,12 +788,6 @@
       if (fs) fs.willChange = "opacity, transform";
       // 被取消（新翻页/换章/关闭）时必须把 iframe 样式复原，不能停在半透明。
       this._anim.restore = () => { if (fs) { fs.opacity = ""; fs.transform = ""; fs.willChange = ""; } };
-      // 供阅读器在“用户已过冷却、下一翻页在等”时立刻把当前页定格到目标，
-      // 不取消动画的视觉尾段，再马上开始下一页（避免冷却被拖到整段动画结束）。
-      this._anim.finish = () => {
-        if (!swapped) { this.scrollPos = targetScroll; swapped = true; }
-        done();
-      };
       const tick = (time) => {
         if (this._destroyed || token !== this._anim.token) return;
         const t = Math.max(0, time - started);
@@ -868,15 +863,6 @@
       const resolve = this._anim.resolve;
       this._anim.resolve = null;
       if (resolve) resolve();
-    }
-
-    /** 用户已过冷却、正在等下一页：把当前翻页动画立刻定格到目标页，避免冷却拖满整段动画。 */
-    finishAnimationNow() {
-      const finish = this._anim.finish;
-      if (!finish) return false;
-      this._anim.finish = null;
-      try { finish(); } catch { }
-      return true;
     }
 
     getSelection() {
