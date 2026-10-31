@@ -13,11 +13,20 @@
   // 翻页冷却：点击/按键后至少过 1/3 个翻页动画时长才接受下一次翻页，避免快速连点打断动画造成卡顿。
   const TURN_COOLDOWN_MS = TURN_ANIM_MS / 3;
 
-  // 翻页串行节拍：翻页动画是 220ms；用计时器等完整动画时长再处理下一次排队翻页。
-  // 不依赖 rAF/Promise 的结束回调（宿主/后台标签页可能暂停 rAF，导致 turnBusy 永远卡住）。
+  // 翻页串行节拍：正常等完整动画；但如果用户在冷却后已经排了下一翻页，
+  // 就把当前页立刻定格（finishAnimationNow）后继续，避免冷却被拖到 220ms。
   function waitTurnAnimation() {
     if (state.prefs.reduceMotion) return Promise.resolve();
-    return new Promise((resolve) => setTimeout(resolve, TURN_ANIM_MS + 40));
+    return (async () => {
+      const started = performance.now();
+      while (performance.now() - started < TURN_ANIM_MS) {
+        await new Promise((resolve) => setTimeout(resolve, 16));
+        if (state.turnQueue.length && paginator) {
+          try { paginator.finishAnimationNow(); } catch { }
+          return;
+        }
+      }
+    })();
   }
 
   const DEFAULT_PREFS = {
@@ -996,9 +1005,12 @@
 
   function enqueueTurn(dir) {
     if (!state.book || state.finalizing) return;
-    // ★ 当前翻页/章节过渡还在进行：直接丢弃这次点击，不再排队。
-    //   旧实现会堆积队列，用户停手后继续往后翻（“停下来还会往后翻页”）。
-    if (state.turnBusy) return;
+    // 动画进行中最多保留 1 个待处理翻页；冷却由 userTurn 控制。
+    // 下一个翻页到来时，processTurns 会把当前页定格后立刻开始，不再等满整段动画。
+    if (state.turnBusy) {
+      if (state.turnQueue.length < 1) state.turnQueue.push(dir > 0 ? 1 : -1);
+      return;
+    }
     state.turnQueue = [dir > 0 ? 1 : -1];
     processTurns();
   }

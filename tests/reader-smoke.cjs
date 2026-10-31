@@ -1,4 +1,4 @@
-﻿/* 浏览器层回归：使用候选扩展文件和合成书，不修改安装目录/用户书库。
+/* 浏览器层回归：使用候选扩展文件和合成书，不修改安装目录/用户书库。
  * 运行：node tests/reader-smoke.cjs
  * 环境：PLAYWRIGHT_MODULE、LYRA_BROWSER_PATH 可选（同 baseline-probe.cjs）。
  */
@@ -206,10 +206,10 @@ function record(id, name, status, detail) {
       await new Promise((r) => setTimeout(r, 1800));      // 留足串行动画时间
       return { before, after: d.paginator.pageIndex, count: d.paginator.pageCount, queue: d.state.turnQueue.length, busy: d.state.turnBusy, snaps, animLog };
     });
-    // 队列最多保留 1 个待处理翻页：连点不会无限堆积，停手后最多再翻一页；
-    // 且 1800ms 后队列必须清空、busy 必须结束，不能永久卡住。
-    record("A12c", "burst clicks drop while animating, no backlog",
-      burst.after >= burst.before + 1 && burst.after <= burst.before + 2 && burst.queue === 0 && !burst.busy ? "PASS" : "FAIL", burst);
+    // 冷却后连点：每次点击都应被接受（当前页被立即定格后开始下一页），
+    // 且 1800ms 后队列必须清空、busy 必须结束，不能停手后继续堆积。
+    record("A12c", "burst clicks after cooldown advance fast without backlog",
+      burst.after === burst.before + 5 && burst.queue === 0 && !burst.busy ? "PASS" : "FAIL", burst);
 
     // 选择文字不翻页
     await open("normal");
