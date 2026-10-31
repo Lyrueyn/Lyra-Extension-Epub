@@ -996,8 +996,10 @@
 
   function enqueueTurn(dir) {
     if (!state.book || state.finalizing) return;
-    state.turnQueue.push(dir > 0 ? 1 : -1);
-    if (state.turnQueue.length > 200) state.turnQueue.splice(0, state.turnQueue.length - 200);
+    // ★ 当前翻页/章节过渡还在进行：直接丢弃这次点击，不再排队。
+    //   旧实现会堆积队列，用户停手后继续往后翻（“停下来还会往后翻页”）。
+    if (state.turnBusy) return;
+    state.turnQueue = [dir > 0 ? 1 : -1];
     processTurns();
   }
 
@@ -1252,6 +1254,7 @@
     const dir = opts.fxDir || (opts.page === "last" ? -1 : 1);
     cancelChapterFx();
     let out = null;
+    let inFx = null;
     try {
       out = frame.animate([
         { opacity: 1, transform: "translate3d(0,0,0)" },
@@ -1269,11 +1272,17 @@
             { opacity: 1, transform: "translate3d(0,0,0)" },
           ], { duration: CH_IN, easing: "cubic-bezier(.33,1,.68,1)" });
           const fx = chapterInFx;
+          inFx = fx;
           fx.finished.then(() => { if (chapterInFx === fx) chapterInFx = null; }, () => { });
         } catch { chapterInFx = null; }
       }
       // 先挂上淡入再撤掉淡出的保持帧，中间不会闪一帧全不透明
       try { if (out) out.cancel(); } catch { }
+    }
+    // ★ 等章节淡入真的完成再返回：否则队列里的下一页会立刻 cancelChapterFx() 把第二章第一页的
+    //   切章动画吞掉，表现为“刚进第二章第一下翻页特别快/没动画”。
+    if (inFx && !state.prefs.reduceMotion) {
+      try { await Promise.race([inFx.finished.catch(() => { }), new Promise((r) => setTimeout(r, CH_IN + 80))]); } catch { }
     }
     return ok;
   }

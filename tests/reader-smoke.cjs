@@ -1,4 +1,4 @@
-/* 浏览器层回归：使用候选扩展文件和合成书，不修改安装目录/用户书库。
+﻿/* 浏览器层回归：使用候选扩展文件和合成书，不修改安装目录/用户书库。
  * 运行：node tests/reader-smoke.cjs
  * 环境：PLAYWRIGHT_MODULE、LYRA_BROWSER_PATH 可选（同 baseline-probe.cjs）。
  */
@@ -165,11 +165,12 @@ function record(id, name, status, detail) {
       await new Promise((r) => setTimeout(r, 120));
       const before = d.paginator.pageIndex;
       document.getElementById("pageNext").click();
-      document.getElementById("pageNext").click();   // 冷却期内：应被丢弃
+      document.getElementById("pageNext").click();   // 动画进行中：应被丢弃
       await new Promise((r) => setTimeout(r, 100));
       const afterTwo = d.paginator.pageIndex;
-      document.getElementById("pageNext").click();   // 冷却已过：应接受
-      await new Promise((r) => setTimeout(r, 360));  // 等当前页动画完成并串行处理队列
+      await new Promise((r) => setTimeout(r, 500));  // 等当前动画完成
+      document.getElementById("pageNext").click();   // 空闲后再点：应接受
+      await new Promise((r) => setTimeout(r, 500));  // 等这一页动画完成
       const afterThird = d.paginator.pageIndex;
       return { before, afterTwo, afterThird, count: d.paginator.pageCount };
     });
@@ -203,10 +204,12 @@ function record(id, name, status, detail) {
         snaps.push({ i, page: d.paginator.pageIndex, queue: d.state.turnQueue.length, busy: d.state.turnBusy, raf: d.paginator._anim && d.paginator._anim.raf });
       }
       await new Promise((r) => setTimeout(r, 1800));      // 留足串行动画时间
-      return { before, after: d.paginator.pageIndex, count: d.paginator.pageCount, snaps, animLog };
+      return { before, after: d.paginator.pageIndex, count: d.paginator.pageCount, queue: d.state.turnQueue.length, busy: d.state.turnBusy, snaps, animLog };
     });
-    record("A12c", "burst clicks over cooldown still advance serially",
-      burst.after === burst.before + 5 ? "PASS" : "FAIL", burst);
+    // 队列最多保留 1 个待处理翻页：连点不会无限堆积，停手后最多再翻一页；
+    // 且 1800ms 后队列必须清空、busy 必须结束，不能永久卡住。
+    record("A12c", "burst clicks drop while animating, no backlog",
+      burst.after >= burst.before + 1 && burst.after <= burst.before + 2 && burst.queue === 0 && !burst.busy ? "PASS" : "FAIL", burst);
 
     // 选择文字不翻页
     await open("normal");
@@ -308,3 +311,4 @@ function record(id, name, status, detail) {
     process.exit(results.some(r => r.status === "FAIL") ? 1 : 0);
   }
 })();
+
