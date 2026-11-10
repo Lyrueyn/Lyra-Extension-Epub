@@ -1713,6 +1713,18 @@
   let pointerDown = null;
   function bindContentInteraction(doc) {
     if (!doc) return;
+    if (!doc.__lyraWheelBound) {
+      doc.__lyraWheelBound = true;
+      doc.addEventListener("wheel", (ev) => {
+        if (!ev.ctrlKey) return;
+        ev.preventDefault();
+        const step = ev.deltaY < 0 ? 1 : -1;
+        const next = Math.max(16, Math.min(36, (Number(state.prefs.fontSize) || 22) + step));
+        if (next === state.prefs.fontSize) return;
+        applyPreferences({ fontSize: next });
+        setStatus("正文字号 " + next);
+      }, { passive: false });
+    }
     doc.addEventListener("pointerdown", (ev) => {
       pointerDown = { x: ev.clientX, y: ev.clientY, time: Date.now() };
     }, true);

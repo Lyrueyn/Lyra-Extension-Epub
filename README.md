@@ -45,3 +45,6 @@ node tests/reader-perf.cjs
 ```
 
 测试结果写入 `tests/artifacts/`。发布压缩包不要包含 `tests/`、测试书或截图。
+## 0.7.0
+
+- Ctrl+滚轮在正文区域调整字号，侧栏/工具栏不缩放。
