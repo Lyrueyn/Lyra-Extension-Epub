@@ -1925,10 +1925,89 @@
     });
   }
 
+  const nativeEd = { files: [], current: "", dirty: new Map(), zip: null };
+  function nativeTextFile(rel) { return /\.(x?html?|htm|css|js|mjs|xml|opf|ncx|svg|txt)$/i.test(rel) || rel === "mimetype"; }
+  function openNativeEditor() {
+    if (!state.book || !state.book.zip) { setStatus("先打开一本 EPUB 再编辑", true); return; }
+    nativeEd.zip = state.book.zip;
+    nativeEd.files = [];
+    nativeEd.zip.forEach((path, entry) => { if (!entry.dir) nativeEd.files.push(path); });
+    nativeEd.files.sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+    nativeEd.dirty.clear(); nativeEd.current = "";
+    $("enStatus").textContent = "共 " + nativeEd.files.length + " 个文件";
+    $("epubNativeEditor").hidden = false;
+    renderNativeFiles();
+    const first = nativeEd.files.find((p) => /\.(x?html?|htm)$/i.test(p)) || nativeEd.files[0];
+    if (first) nativeOpen(first);
+  }
+  function renderNativeFiles() {
+    const box = $("enFiles"); box.innerHTML = "";
+    for (const rel of nativeEd.files) {
+      const d = document.createElement("div");
+      d.className = "en-file" + (rel === nativeEd.current ? " active" : "");
+      d.textContent = (nativeEd.dirty.has(rel) ? "● " : "") + rel;
+      d.title = rel;
+      d.addEventListener("click", () => nativeOpen(rel));
+      box.appendChild(d);
+    }
+  }
+  async function nativeOpen(rel) {
+    if (!nativeEd.zip) return;
+    if (nativeEd.current && nativeEd.current !== rel && document.activeElement === $("enCode")) {
+      nativeEd.dirty.set(nativeEd.current, $("enCode").value);
+    }
+    nativeEd.current = rel;
+    renderNativeFiles();
+    if (!nativeTextFile(rel)) {
+      $("enCode").value = "";
+      $("enCode").disabled = true;
+      $("enStatus").textContent = rel + " · 二进制文件，不支持源码编辑";
+      return;
+    }
+    $("enCode").disabled = false;
+    const entry = nativeEd.zip.file(rel);
+    $("enCode").value = entry ? await entry.async("string") : "";
+    $("enStatus").textContent = rel + (nativeEd.dirty.has(rel) ? " · 已修改" : "");
+  }
+  function closeNativeEditor(force) {
+    if (!force && nativeEd.dirty.size && !confirm("有未保存修改，确定关闭？")) return;
+    $("epubNativeEditor").hidden = true;
+    nativeEd.zip = null; nativeEd.dirty.clear(); nativeEd.current = "";
+  }
+  async function saveNativeEditor() {
+    if (!nativeEd.zip) return;
+    if (!nativeEd.dirty.size) { $("enStatus").textContent = "没有需要保存的修改"; return; }
+    $("enSave").disabled = true;
+    $("enStatus").textContent = "正在打包 EPUB…";
+    try {
+      for (const [rel, text] of nativeEd.dirty) nativeEd.zip.file(rel, text);
+      nativeEd.zip.file("mimetype", "application/epub+zip", { compression: "STORE" });
+      const bytes = await nativeEd.zip.generateAsync({ type: "uint8array", mimeType: "application/epub+zip", compression: "DEFLATE" });
+      await hostRequest("host.workspace.save", { data: bytesToBase64(bytes) });
+      nativeEd.dirty.clear();
+      $("epubNativeEditor").hidden = true;
+      await openBookBuffer(bytes.buffer, state.book.fileName || state.fileName || "book.epub", { loadId: "load-" + Date.now().toString(36), manual: true });
+      setStatus("EPUB 已保存并重新载入", false);
+    } catch (e) {
+      $("enStatus").textContent = "保存失败：" + (e && e.message ? e.message : e);
+      setStatus("EPUB 保存失败：" + (e && e.message ? e.message : e), true);
+    } finally { $("enSave").disabled = false; }
+  }
+  function bindNativeEditor() {
+    $("editEpubBtn").addEventListener("click", openNativeEditor);
+    $("enClose").addEventListener("click", () => closeNativeEditor(false));
+    $("enSave").addEventListener("click", saveNativeEditor);
+    $("enCode").addEventListener("input", () => {
+      if (!nativeEd.current || !nativeTextFile(nativeEd.current)) return;
+      nativeEd.dirty.set(nativeEd.current, $("enCode").value);
+      $("enStatus").textContent = nativeEd.current + " · 已修改";
+      renderNativeFiles();
+    });
+  }
+
   function bindFileUi() {
     $("openBtn").addEventListener("click", () => { $("file").value = ""; $("file").click(); });
-    $("editEpubBtn").addEventListener("click", openEpubEditor);
-    $("epubEditorClose").addEventListener("click", closeEpubEditor);
+    $("editEpubBtn").addEventListener("click", openNativeEditor);
     $("emptyOpenBtn").addEventListener("click", () => { $("file").value = ""; $("file").click(); });
     $("file").addEventListener("change", async (ev) => {
       const file = ev.target.files && ev.target.files[0];
@@ -2140,7 +2219,7 @@
     bindSearchUi();
     bindKeyboard();
     bindHostMessages();
-    bindEpubEditorMessages();
+    bindNativeEditor();
     $("sidebarBtn").addEventListener("click", () => applyPreferences({ sidebar: $("sidebar").classList.contains("collapsed") }, { save: true }));
     document.querySelectorAll(".side-tabs button").forEach((b) => b.addEventListener("click", () => showSidebarTab(b.dataset.tab)));
     $("addBookmarkBtn").addEventListener("click", addBookmark);

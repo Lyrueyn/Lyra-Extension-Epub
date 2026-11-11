@@ -115,3 +115,13 @@ button.icon { width: 32px; padding: 6px 0; text-align: center; font-size: 15px; 
 .epub-editor-head span { color: #8b94a6; font-size: 12px; }
 .epub-editor-head button { margin-left: auto; background: #252a34; border: 1px solid #363d4b; color: #e6e8ef; border-radius: 6px; width: 28px; height: 26px; cursor: pointer; }
 #epubEditorFrame { flex: 1; border: 0; width: 100%; min-height: 0; background: #14161b; }
+
+.epub-native{position:fixed;inset:0;z-index:2100;background:#14161b;display:flex;flex-direction:column}
+.epub-native[hidden]{display:none}
+.epub-native-head{height:42px;flex:0 0 42px;display:flex;align-items:center;gap:10px;padding:0 12px;background:#1b1f27;border-bottom:1px solid #2a303c;color:#e6e8ef}
+.epub-native-head strong{color:#66ccff}.epub-native-head span{color:#8b94a6;font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.epub-native-head button{background:#252a34;border:1px solid #363d4b;color:#e6e8ef;border-radius:6px;padding:5px 10px;cursor:pointer}.epub-native-head button.primary{background:#2f6fed;border-color:#2f6fed}
+.epub-native-body{flex:1;display:grid;grid-template-columns:280px 1fr;min-height:0}
+#enFiles{overflow:auto;border-right:1px solid #2a303c;padding:6px;background:#181b22}
+.en-file{padding:5px 8px;border-radius:5px;color:#c7cedc;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:12px/1.4 Consolas,monospace}.en-file:hover{background:#222833}.en-file.active{background:#26364f;color:#fff}
+#enCode{width:100%;height:100%;border:0;resize:none;background:#11141a;color:#e6e8ef;font:12px/1.55 Consolas,monospace;padding:10px;outline:none}

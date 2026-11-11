@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>璃鸢镜 · EPUB 阅读器</title>
-<link rel="stylesheet" href="reader.css?v=0.8.5"/>
+<link rel="stylesheet" href="reader.css?v=0.8.6"/>
 </head>
 <body>
 <div id="app">
@@ -102,6 +102,17 @@
     <iframe id="epubEditorFrame" title="EPUB 编辑器"></iframe>
   </div>
 
+  <div id="epubNativeEditor" class="epub-native" hidden>
+    <div class="epub-native-head">
+      <strong>EPUB 编辑器</strong><span id="enStatus">选择左侧文件开始编辑</span>
+      <button id="enSave" class="primary">保存</button><button id="enClose">关闭</button>
+    </div>
+    <div class="epub-native-body">
+      <aside id="enFiles"></aside>
+      <main><textarea id="enCode" spellcheck="false" placeholder="选择 EPUB 内部文件"></textarea></main>
+    </div>
+  </div>
+
   <footer id="statusbar">
     <span id="statusText">准备就绪</span>
     <span id="saveStateText"></span>
@@ -110,11 +121,11 @@
 </div>
 
 <script src="lib/jszip.min.js"></script>
-<script src="epub-book.js?v=0.8.5"></script>
-<script src="paginator.js?v=0.8.5"></script>
-<script src="reader-state.js?v=0.8.5"></script>
-<script src="search.js?v=0.8.5"></script>
-<script src="reader.js?v=0.8.5"></script>
+<script src="epub-book.js?v=0.8.6"></script>
+<script src="paginator.js?v=0.8.6"></script>
+<script src="reader-state.js?v=0.8.6"></script>
+<script src="search.js?v=0.8.6"></script>
+<script src="reader.js?v=0.8.6"></script>
 </body>
 </html>
 
