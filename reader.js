@@ -3,6 +3,8 @@
   "use strict";
 
   const $ = (id) => document.getElementById(id);
+  const queryParams = new URLSearchParams(location.search);
+  const editorOrigin = queryParams.get("extensionsOrigin") || "https://lyra-extensions.local";
   const clientState = window.LyraReaderState;
   const bookModule = window.LyraEpubBook;
   const paginatorModule = window.LyraPaginator;
