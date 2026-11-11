@@ -79,6 +79,7 @@
     epubEditorReady: false,
     epubEditorLoaded: false,
     epubEditorLoadTries: 0,
+    epubEditorLoadToken: "",
     epubEditorLoadedAck: false,
     epubEditorLoadTimer: 0,
     lastRevision: 0,
@@ -1843,8 +1844,10 @@
     state.epubEditorLoaded = true;
     const raw = state.book.rawBytes;
     const buffer = raw instanceof ArrayBuffer ? raw : raw instanceof Uint8Array ? raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) : new Uint8Array(raw).buffer;
+    state.epubEditorLoadToken = "load-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
     frame.contentWindow.postMessage({
       type: "epub-editor-load",
+      token: state.epubEditorLoadToken,
       name: state.book.fileName || state.fileName || "book.epub",
       data: buffer,
     }, "*");
@@ -1887,9 +1890,15 @@
         return;
       }
       if (d.type === "epub-editor-loaded") {
+        if (d.token && d.token !== state.epubEditorLoadToken) return;
         state.epubEditorLoadedAck = !!d.ok;
         clearTimeout(state.epubEditorLoadTimer);
         $("epubEditorStatus").textContent = d.ok ? "EPUB 已载入，可编辑" : "载入失败：" + (d.error || "");
+        return;
+      }
+      if (d.type === "epub-editor-need-data") {
+        if ($("epubEditorOverlay").hidden || !state.book) return;
+        sendEpubEditorLoad();
         return;
       }
       if (d.type === "epub-editor-save") {
