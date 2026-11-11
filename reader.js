@@ -78,6 +78,9 @@
     hostRequests: new Map(),
     epubEditorReady: false,
     epubEditorLoaded: false,
+    epubEditorLoadTries: 0,
+    epubEditorLoadedAck: false,
+    epubEditorLoadTimer: 0,
     lastRevision: 0,
     lastPositionRevision: 0,
     lastStablePosition: null,
@@ -1838,12 +1841,19 @@
     const frame = $("epubEditorFrame");
     if (!frame || !frame.contentWindow) return;
     state.epubEditorLoaded = true;
+    const raw = state.book.rawBytes;
+    const buffer = raw instanceof ArrayBuffer ? raw : raw instanceof Uint8Array ? raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) : new Uint8Array(raw).buffer;
     frame.contentWindow.postMessage({
       type: "epub-editor-load",
       name: state.book.fileName || state.fileName || "book.epub",
-      data: bytesToBase64(state.book.rawBytes instanceof Uint8Array ? state.book.rawBytes : new Uint8Array(state.book.rawBytes)),
+      data: buffer,
     }, "*");
+    state.epubEditorLoadTries = (state.epubEditorLoadTries || 0) + 1;
     $("epubEditorStatus").textContent = "已发送 " + ((state.book.fileName || state.fileName) || "EPUB") + "，正在加载…";
+    clearTimeout(state.epubEditorLoadTimer);
+    state.epubEditorLoadTimer = setTimeout(() => {
+      if (!state.epubEditorLoadedAck && state.epubEditorLoadTries < 3) sendEpubEditorLoad();
+    }, 2500);
   }
   function openEpubEditor() {
     if (!state.book || !state.ready) { setStatus("先打开一本 EPUB 再编辑", true); return; }
@@ -1871,7 +1881,15 @@
       if (event.source !== frame.contentWindow) return;
       if (d.type === "epub-editor-ready") {
         state.epubEditorReady = true;
+        state.epubEditorLoadedAck = false;
+        state.epubEditorLoadTries = 0;
         sendEpubEditorLoad();
+        return;
+      }
+      if (d.type === "epub-editor-loaded") {
+        state.epubEditorLoadedAck = !!d.ok;
+        clearTimeout(state.epubEditorLoadTimer);
+        $("epubEditorStatus").textContent = d.ok ? "EPUB 已载入，可编辑" : "载入失败：" + (d.error || "");
         return;
       }
       if (d.type === "epub-editor-save") {
@@ -1881,8 +1899,9 @@
         };
         try {
           $("epubEditorStatus").textContent = "正在写回 EPUB…";
-          await hostRequest("host.workspace.save", { data: d.data });
-          const bytes = base64ToBytes(d.data);
+          const rawSave = d.data;
+          const bytes = rawSave instanceof ArrayBuffer ? new Uint8Array(rawSave) : rawSave instanceof Uint8Array ? rawSave : base64ToBytes(rawSave);
+          await hostRequest("host.workspace.save", { data: bytesToBase64(bytes) });
           ack(true);
           closeEpubEditor();
           await openBookBuffer(bytes.buffer, d.name || state.book.fileName || "book.epub", { loadId: "load-" + Date.now().toString(36), manual: true });
