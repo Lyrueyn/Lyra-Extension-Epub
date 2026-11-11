@@ -1867,7 +1867,7 @@
     $("epubEditorStatus").textContent = "正在打开 EPUB 编辑器…";
     overlay.hidden = false;
     const origin = editorOrigin || "https://lyra-extensions.local";
-    frame.src = origin + "/epub-editor/index.html?embedded=1&extensionsOrigin=" + encodeURIComponent(origin);
+    frame.src = origin + "/epub-editor/index.html?embedded=1&v=" + encodeURIComponent("1.0.4-" + Date.now().toString(36)) + "&extensionsOrigin=" + encodeURIComponent(origin);
   }
   function closeEpubEditor() {
     $("epubEditorOverlay").hidden = true;
