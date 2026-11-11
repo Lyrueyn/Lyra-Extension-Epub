@@ -107,3 +107,11 @@ button.icon { width: 32px; padding: 6px 0; text-align: center; font-size: 15px; 
   #pageFrame { padding: 8px 10px; }
   #statusbar { font-size: 10px; gap: 8px; }
 }
+
+.epub-editor-overlay { position: fixed; inset: 0; z-index: 2000; background: #14161b; display: flex; flex-direction: column; }
+.epub-editor-overlay[hidden] { display: none; }
+.epub-editor-head { height: 38px; flex: 0 0 38px; display: flex; align-items: center; gap: 10px; padding: 0 12px; background: #1b1f27; border-bottom: 1px solid #2a303c; color: #e6e8ef; }
+.epub-editor-head strong { color: #66ccff; font-size: 13px; }
+.epub-editor-head span { color: #8b94a6; font-size: 12px; }
+.epub-editor-head button { margin-left: auto; background: #252a34; border: 1px solid #363d4b; color: #e6e8ef; border-radius: 6px; width: 28px; height: 26px; cursor: pointer; }
+#epubEditorFrame { flex: 1; border: 0; width: 100%; min-height: 0; background: #14161b; }

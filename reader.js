@@ -72,6 +72,10 @@
     prefsFlushPromise: null,
     prefsSaveGeneration: 0,
     saveFailed: false,
+    hostReqSeq: 0,
+    hostRequests: new Map(),
+    epubEditorReady: false,
+    epubEditorLoaded: false,
     lastRevision: 0,
     lastPositionRevision: 0,
     lastStablePosition: null,
@@ -1801,8 +1805,100 @@
   }
 
   /* ---------------- 文件与全局事件 ---------------- */
+  function bytesToBase64(bytes) {
+    let bin = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    return btoa(bin);
+  }
+  function base64ToBytes(b64) {
+    const bin = atob(String(b64 || ""));
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function hostRequest(type, payload) {
+    return new Promise((resolve, reject) => {
+      if (!window.chrome || !window.chrome.webview) { reject(new Error("宿主不可用")); return; }
+      const requestId = "epub-reader-" + (++state.hostReqSeq) + "-" + Date.now().toString(36);
+      state.hostRequests.set(requestId, { resolve, reject });
+      window.chrome.webview.postMessage(Object.assign({ type: type, requestId: requestId }, payload || {}));
+      setTimeout(() => {
+        const p = state.hostRequests.get(requestId);
+        if (!p) return;
+        state.hostRequests.delete(requestId);
+        reject(new Error("宿主保存响应超时"));
+      }, 20000);
+    });
+  }
+  function sendEpubEditorLoad() {
+    if (!state.book || !state.book.rawBytes) return;
+    const frame = $("epubEditorFrame");
+    if (!frame || !frame.contentWindow) return;
+    state.epubEditorLoaded = true;
+    frame.contentWindow.postMessage({
+      type: "epub-editor-load",
+      name: state.book.fileName || state.fileName || "book.epub",
+      data: bytesToBase64(state.book.rawBytes instanceof Uint8Array ? state.book.rawBytes : new Uint8Array(state.book.rawBytes)),
+    }, "*");
+    $("epubEditorStatus").textContent = "已发送 " + ((state.book.fileName || state.fileName) || "EPUB") + "，正在加载…";
+  }
+  function openEpubEditor() {
+    if (!state.book || !state.ready) { setStatus("先打开一本 EPUB 再编辑", true); return; }
+    const overlay = $("epubEditorOverlay");
+    const frame = $("epubEditorFrame");
+    state.epubEditorReady = false;
+    state.epubEditorLoaded = false;
+    $("epubEditorStatus").textContent = "正在打开 EPUB 编辑器…";
+    overlay.hidden = false;
+    const origin = editorOrigin || "https://lyra-extensions.local";
+    frame.src = origin + "/epub-editor/index.html?embedded=1&extensionsOrigin=" + encodeURIComponent(origin);
+  }
+  function closeEpubEditor() {
+    $("epubEditorOverlay").hidden = true;
+    $("epubEditorFrame").src = "about:blank";
+    state.epubEditorReady = false;
+    state.epubEditorLoaded = false;
+  }
+  function bindEpubEditorMessages() {
+    const frame = $("epubEditorFrame");
+    if (!frame) return;
+    frame.addEventListener("load", () => { state.epubEditorReady = false; });
+    window.addEventListener("message", async (event) => {
+      const d = event.data || {};
+      if (event.source !== frame.contentWindow) return;
+      if (d.type === "epub-editor-ready") {
+        state.epubEditorReady = true;
+        sendEpubEditorLoad();
+        return;
+      }
+      if (d.type === "epub-editor-save") {
+        const saveId = d.saveId || "";
+        const ack = (ok, error) => {
+          try { frame.contentWindow.postMessage({ type: "epub-editor-saved", saveId: saveId, ok: ok, error: error || "" }, "*"); } catch { }
+        };
+        try {
+          $("epubEditorStatus").textContent = "正在写回 EPUB…";
+          await hostRequest("host.workspace.save", { data: d.data });
+          const bytes = base64ToBytes(d.data);
+          ack(true);
+          closeEpubEditor();
+          await openBookBuffer(bytes.buffer, d.name || state.book.fileName || "book.epub", { loadId: "load-" + Date.now().toString(36), manual: true });
+          setStatus("EPUB 已保存并重新载入", false);
+        } catch (e) {
+          ack(false, e && e.message ? e.message : String(e));
+          $("epubEditorStatus").textContent = "保存失败：" + (e && e.message ? e.message : e);
+          setStatus("EPUB 保存失败：" + (e && e.message ? e.message : e), true);
+        }
+        return;
+      }
+    });
+  }
+
   function bindFileUi() {
     $("openBtn").addEventListener("click", () => { $("file").value = ""; $("file").click(); });
+    $("editEpubBtn").addEventListener("click", openEpubEditor);
+    $("epubEditorClose").addEventListener("click", closeEpubEditor);
     $("emptyOpenBtn").addEventListener("click", () => { $("file").value = ""; $("file").click(); });
     $("file").addEventListener("change", async (ev) => {
       const file = ev.target.files && ev.target.files[0];
@@ -1951,6 +2047,14 @@
           try { state.client._hostEpoch = { activationEpoch: Number(d.activationEpoch) || 0, navEpoch: Number(d.navEpoch) || 0 }; } catch { }
           return;
         }
+        if (d.type === "host.workspace.save.result" && d.requestId) {
+          const p = state.hostRequests.get(d.requestId);
+          if (p) {
+            state.hostRequests.delete(d.requestId);
+            if (d.ok === false) p.reject(new Error(d.error || "保存失败")); else p.resolve(d);
+          }
+          return;
+        }
         if (d.type === "openBook" && d.data) {
           // 旧宿主重复投喂：已经由网址加载或已有书时，忽略；只在首次兼容通道接受
           if (state.urlBookRequested || state.book || state.busy || state.legacyAccepted) return;
@@ -2006,6 +2110,7 @@
     bindSearchUi();
     bindKeyboard();
     bindHostMessages();
+    bindEpubEditorMessages();
     $("sidebarBtn").addEventListener("click", () => applyPreferences({ sidebar: $("sidebar").classList.contains("collapsed") }, { save: true }));
     document.querySelectorAll(".side-tabs button").forEach((b) => b.addEventListener("click", () => showSidebarTab(b.dataset.tab)));
     $("addBookmarkBtn").addEventListener("click", addBookmark);

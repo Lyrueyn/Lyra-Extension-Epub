@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>璃鸢镜 · EPUB 阅读器</title>
-<link rel="stylesheet" href="reader.css?v=0.6.9"/>
+<link rel="stylesheet" href="reader.css?v=0.8.0"/>
 </head>
 <body>
 <div id="app">
@@ -12,6 +12,7 @@
     <button id="sidebarBtn" class="icon" title="目录 / 书签" aria-label="目录 / 书签">☰</button>
     <div id="bookTitle">璃鸢镜 · EPUB 阅读器</div>
     <button id="openBtn" class="primary">打开 EPUB</button>
+    <button id="editEpubBtn" title="编辑整本 EPUB 内部文件">编辑 EPUB</button>
     <button id="findBtn" title="全文查找 (Ctrl+F)">查找</button>
     <button id="addBookmarkBtn" title="加书签">加书签</button>
     <button id="chapterPrev" title="上一章">上一章</button>
@@ -92,6 +93,15 @@
     </main>
   </div>
 
+  <div id="epubEditorOverlay" class="epub-editor-overlay" hidden>
+    <div class="epub-editor-head">
+      <strong>EPUB 编辑器</strong>
+      <span id="epubEditorStatus"></span>
+      <button id="epubEditorClose" title="关闭编辑器">×</button>
+    </div>
+    <iframe id="epubEditorFrame" title="EPUB 编辑器"></iframe>
+  </div>
+
   <footer id="statusbar">
     <span id="statusText">准备就绪</span>
     <span id="saveStateText"></span>
@@ -100,11 +110,11 @@
 </div>
 
 <script src="lib/jszip.min.js"></script>
-<script src="epub-book.js?v=0.6.9"></script>
-<script src="paginator.js?v=0.6.9"></script>
-<script src="reader-state.js?v=0.6.9"></script>
-<script src="search.js?v=0.6.9"></script>
-<script src="reader.js?v=0.6.9"></script>
+<script src="epub-book.js?v=0.8.0"></script>
+<script src="paginator.js?v=0.8.0"></script>
+<script src="reader-state.js?v=0.8.0"></script>
+<script src="search.js?v=0.8.0"></script>
+<script src="reader.js?v=0.8.0"></script>
 </body>
 </html>
 
