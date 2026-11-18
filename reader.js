@@ -1913,6 +1913,11 @@
         sendEpubEditorLoad();
         return;
       }
+      if (d.type === "epub-editor-close") {
+        closeEpubEditor();
+        setStatus("已返回阅读", false);
+        return;
+      }
       if (d.type === "epub-editor-save") {
         const saveId = d.saveId || "";
         const ack = (ok, error) => {
