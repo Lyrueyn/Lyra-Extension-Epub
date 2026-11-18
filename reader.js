@@ -5,6 +5,7 @@
   const $ = (id) => document.getElementById(id);
   const queryParams = new URLSearchParams(location.search);
   const editorOrigin = queryParams.get("extensionsOrigin") || "https://lyra-extensions.local";
+  const epubEditorAvailable = queryParams.get("epubEditor") === "1";
   const clientState = window.LyraReaderState;
   const bookModule = window.LyraEpubBook;
   const paginatorModule = window.LyraPaginator;
@@ -1867,9 +1868,18 @@
     $("epubEditorStatus").textContent = "正在打开 EPUB 编辑器…";
     overlay.hidden = false;
     const origin = editorOrigin || "https://lyra-extensions.local";
-    frame.src = origin + "/epub-editor/index.html?embedded=1&v=" + encodeURIComponent("1.0.4-" + Date.now().toString(36)) + "&extensionsOrigin=" + encodeURIComponent(origin);
+    frame.src = origin + "/epub-editor/index.html?embedded=1&v=" + encodeURIComponent("1.0.7-" + Date.now().toString(36)) + "&extensionsOrigin=" + encodeURIComponent(origin);
+    clearTimeout(state.epubEditorFallbackTimer);
+    state.epubEditorFallbackTimer = setTimeout(() => {
+      if (state.epubEditorReady || $("epubEditorOverlay").hidden) return;
+      // 外部编辑器没能启动：退回内置编辑器，绝不让用户卡在空白遮罩
+      closeEpubEditor();
+      setStatus("EPUB 编辑器插件未能启动，已切换到内置编辑器", true);
+      openNativeEditor();
+    }, 3500);
   }
   function closeEpubEditor() {
+    clearTimeout(state.epubEditorFallbackTimer);
     $("epubEditorOverlay").hidden = true;
     $("epubEditorFrame").src = "about:blank";
     state.epubEditorReady = false;
@@ -1884,6 +1894,7 @@
       if (event.source !== frame.contentWindow) return;
       if (d.type === "epub-editor-ready") {
         state.epubEditorReady = true;
+        clearTimeout(state.epubEditorFallbackTimer);
         state.epubEditorLoadedAck = false;
         state.epubEditorLoadTries = 0;
         sendEpubEditorLoad();
@@ -1894,6 +1905,7 @@
         state.epubEditorLoadedAck = !!d.ok;
         clearTimeout(state.epubEditorLoadTimer);
         $("epubEditorStatus").textContent = d.ok ? "EPUB 已载入，可编辑" : "载入失败：" + (d.error || "");
+        if (!d.ok) setStatus("EPUB 编辑器载入失败：" + (d.error || ""), true);
         return;
       }
       if (d.type === "epub-editor-need-data") {
@@ -1993,8 +2005,16 @@
       setStatus("EPUB 保存失败：" + (e && e.message ? e.message : e), true);
     } finally { $("enSave").disabled = false; }
   }
+  function bindEpubEditor() {
+    $("epubEditorClose").addEventListener("click", closeEpubEditor);
+    bindEpubEditorMessages();
+    $("editEpubBtn").addEventListener("click", () => {
+      if (epubEditorAvailable) openEpubEditor();
+      else openNativeEditor();
+    });
+  }
+
   function bindNativeEditor() {
-    $("editEpubBtn").addEventListener("click", openNativeEditor);
     $("enClose").addEventListener("click", () => closeNativeEditor(false));
     $("enSave").addEventListener("click", saveNativeEditor);
     $("enCode").addEventListener("input", () => {
@@ -2007,7 +2027,6 @@
 
   function bindFileUi() {
     $("openBtn").addEventListener("click", () => { $("file").value = ""; $("file").click(); });
-    $("editEpubBtn").addEventListener("click", openNativeEditor);
     $("emptyOpenBtn").addEventListener("click", () => { $("file").value = ""; $("file").click(); });
     $("file").addEventListener("change", async (ev) => {
       const file = ev.target.files && ev.target.files[0];
@@ -2219,6 +2238,7 @@
     bindSearchUi();
     bindKeyboard();
     bindHostMessages();
+    bindEpubEditor();
     bindNativeEditor();
     $("sidebarBtn").addEventListener("click", () => applyPreferences({ sidebar: $("sidebar").classList.contains("collapsed") }, { save: true }));
     document.querySelectorAll(".side-tabs button").forEach((b) => b.addEventListener("click", () => showSidebarTab(b.dataset.tab)));
