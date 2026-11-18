@@ -1918,6 +1918,10 @@
         setStatus("已返回阅读", false);
         return;
       }
+      if (d.type === "epub-editor-backup") {
+        try { if (d.path && d.data) await hostRequest("host.file.save", { path: d.path, data: d.data }); } catch { }
+        return;
+      }
       if (d.type === "epub-editor-save") {
         const saveId = d.saveId || "";
         const ack = (ok, error) => {
