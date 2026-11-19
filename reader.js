@@ -83,6 +83,8 @@
     epubEditorLoadToken: "",
     epubEditorLoadedAck: false,
     epubEditorLoadTimer: 0,
+    epubAutoBytes: null,
+    epubAutoName: "",
     lastRevision: 0,
     lastPositionRevision: 0,
     lastStablePosition: null,
@@ -1878,12 +1880,22 @@
       openNativeEditor();
     }, 3500);
   }
-  function closeEpubEditor() {
+  function closeEpubEditor(reloadAuto = true) {
     clearTimeout(state.epubEditorFallbackTimer);
     $("epubEditorOverlay").hidden = true;
     $("epubEditorFrame").src = "about:blank";
     state.epubEditorReady = false;
     state.epubEditorLoaded = false;
+    const auto = state.epubAutoBytes;
+    const autoName = state.epubAutoName || (state.book && state.book.fileName) || state.fileName || "book.epub";
+    state.epubAutoBytes = null;
+    state.epubAutoName = "";
+    if (reloadAuto && auto) {
+      setStatus("EPUB 已自动保存，正在重新载入…", false);
+      openBookBuffer(auto.buffer, autoName, { loadId: "load-" + Date.now().toString(36), manual: false }).catch((e) => {
+        setStatus("自动保存后重新载入失败：" + (e && e.message ? e.message : e), true);
+      });
+    }
   }
   function bindEpubEditorMessages() {
     const frame = $("epubEditorFrame");
@@ -1932,8 +1944,17 @@
           const rawSave = d.data;
           const bytes = rawSave instanceof ArrayBuffer ? new Uint8Array(rawSave) : rawSave instanceof Uint8Array ? rawSave : base64ToBytes(rawSave);
           await hostRequest("host.workspace.save", { data: bytesToBase64(bytes) });
+          if (d.silent) {
+            state.epubAutoBytes = bytes;
+            state.epubAutoName = d.name || state.book.fileName || "book.epub";
+            ack(true);
+            setStatus("EPUB 已自动保存", false);
+            return;
+          }
+          state.epubAutoBytes = null;
+          state.epubAutoName = "";
           ack(true);
-          closeEpubEditor();
+          closeEpubEditor(false);
           await openBookBuffer(bytes.buffer, d.name || state.book.fileName || "book.epub", { loadId: "load-" + Date.now().toString(36), manual: true });
           setStatus("EPUB 已保存并重新载入", false);
         } catch (e) {
