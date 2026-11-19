@@ -1870,7 +1870,14 @@
     $("epubEditorStatus").textContent = "正在打开 EPUB 编辑器…";
     overlay.hidden = false;
     const origin = editorOrigin || "https://lyra-extensions.local";
-    frame.src = origin + "/epub-editor/index.html?embedded=1&v=" + encodeURIComponent("1.0.7-" + Date.now().toString(36)) + "&extensionsOrigin=" + encodeURIComponent(origin);
+    const rp = state.prefs || {};
+    const readerQuery = "&readerTheme=" + encodeURIComponent(rp.theme || "dark")
+      + "&readerFont=" + encodeURIComponent(String(rp.fontSize || 22))
+      + "&readerLine=" + encodeURIComponent(String(rp.lineHeight || 1.95))
+      + "&readerWidth=" + encodeURIComponent(String(rp.contentWidth || 860))
+      + "&readerBg=" + encodeURIComponent(rp.bg || "")
+      + "&readerFg=" + encodeURIComponent(rp.fg || "");
+    frame.src = origin + "/epub-editor/index.html?embedded=1&v=" + encodeURIComponent("1.0.7-" + Date.now().toString(36)) + "&extensionsOrigin=" + encodeURIComponent(origin) + readerQuery;
     clearTimeout(state.epubEditorFallbackTimer);
     state.epubEditorFallbackTimer = setTimeout(() => {
       if (state.epubEditorReady || $("epubEditorOverlay").hidden) return;
